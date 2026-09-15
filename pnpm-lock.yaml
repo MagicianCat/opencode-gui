@@ -8,30 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@floating-ui/dom':
-        specifier: ^1.7.5
-        version: 1.7.5
-      '@opencode-ai/sdk':
-        specifier: ^1.2.14
-        version: 1.2.14
-      '@tiptap/core':
-        specifier: ^2.27.2
-        version: 2.27.2(@tiptap/pm@2.27.2)
-      '@tiptap/extension-document':
-        specifier: ^2.27.2
-        version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))
-      '@tiptap/extension-mention':
-        specifier: ^2.27.2
-        version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2)(@tiptap/suggestion@2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2))
-      '@tiptap/extension-paragraph':
-        specifier: ^2.27.2
-        version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))
-      '@tiptap/extension-text':
-        specifier: ^2.27.2
-        version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))
-      '@tiptap/suggestion':
-        specifier: ^2.27.2
-        version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2)
       marked:
         specifier: ^17.0.1
         version: 17.0.1
@@ -56,9 +32,6 @@ importers:
       solid-js:
         specifier: ^1.9.10
         version: 1.9.10
-      tiptap-solid:
-        specifier: ^1.2.1
-        version: 1.2.1(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/extension-bubble-menu@2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2))(@tiptap/extension-floating-menu@2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2)(solid-js@1.9.10)
       unified:
         specifier: ^11.0.5
         version: 11.0.5
@@ -75,6 +48,9 @@ importers:
       '@types/mocha':
         specifier: ^10.x
         version: 10.0.10
+      '@types/hast':
+        specifier: ^3.0.4
+        version: 3.0.4
       '@types/node':
         specifier: ^20.x
         version: 20.19.26

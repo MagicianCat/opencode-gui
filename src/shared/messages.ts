@@ -1,243 +1,31 @@
 import { z } from "zod/v4";
 
-export const ToolStateSchema = z.object({
-  status: z.enum(["pending", "running", "completed", "error"]),
-  input: z.record(z.string(), z.unknown()).optional(),
-  output: z.string().optional(),
-  error: z.string().optional(),
-  title: z.string().optional(),
-  time: z
-    .object({
-      start: z.number(),
-      end: z.number().optional(),
-    })
-    .optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
-export type ToolState = z.infer<typeof ToolStateSchema>;
-
-export const MessagePartSchema = z
-  .object({
-    id: z.string(),
-    type: z.enum(["text", "reasoning", "tool", "file", "step-start", "step-finish", "snapshot", "patch"]),
-    text: z.string().optional(),
-    tool: z.string().optional(),
-    state: ToolStateSchema.optional(),
-    snapshot: z.string().optional(),
-    messageID: z.string().optional(),
-    callID: z.string().optional(),
-  })
-  .passthrough();
-export type MessagePart = z.infer<typeof MessagePartSchema>;
-
-export const MessageSchema = z.object({
-  id: z.string(),
-  type: z.enum(["user", "assistant"]),
-  text: z.string().optional(),
-  time: z.object({
-    created: z.number(),
-    completed: z.number().optional(),
-  }).optional(),
-  // Note: parts are stored separately in store.part[messageID], not on Message
-});
-export type Message = z.infer<typeof MessageSchema>;
-
-export const AgentSchema = z.object({
-  name: z.string(),
-  description: z.string().optional(),
-  mode: z.enum(["subagent", "primary", "all"]),
-  builtIn: z.boolean().optional(),
-  options: z
-    .object({
-      color: z.string().optional(),
-    })
-    .catchall(z.unknown())
-    .optional(),
-});
-export type Agent = z.infer<typeof AgentSchema>;
-
-export const FileDiffSchema = z.object({
-  file: z.string(),
-  before: z.string(),
-  after: z.string(),
-  additions: z.number(),
-  deletions: z.number(),
-});
-export type FileDiff = z.infer<typeof FileDiffSchema>;
-
-export const SessionSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  projectID: z.string(),
-  directory: z.string(),
-  parentID: z.string().optional(),
-  time: z.object({
-    created: z.number(),
-    updated: z.number(),
-  }),
-  summary: z.object({
-    additions: z.number(),
-    deletions: z.number(),
-    files: z.number(),
-    diffs: z.array(FileDiffSchema).optional(),
-  }).optional(),
-});
+export const OsTypeSchema = z.enum(["MACOS", "WINDOWS", "LINUX"]);
+export type OsType = z.infer<typeof OsTypeSchema>;
+export const InstallStatusSchema = z.enum(["project", "global", "update", "missing"]);
+export type InstallStatus = z.infer<typeof InstallStatusSchema>;
+export const SessionSchema = z.object({ sessionKey: z.string(), title: z.string().optional().default("新对话"), createdAt: z.string().optional(), updatedAt: z.string().optional() }).passthrough();
 export type Session = z.infer<typeof SessionSchema>;
+export const ChatMessageSchema = z.object({ id: z.string(), role: z.enum(["user", "assistant"]), content: z.string(), runKey: z.string().optional(), createdAt: z.string().optional() });
+export type ChatMessage = z.infer<typeof ChatMessageSchema>;
+export const RecommendationSchema = z.object({ skillKey: z.string(), name: z.string().optional(), description: z.string().optional(), version: z.string().optional(), versionId: z.number().int().positive().optional(), reason: z.string().optional(), detailPath: z.string().optional(), status: InstallStatusSchema.optional().default("missing"), localVersion: z.string().optional() });
+export type Recommendation = z.infer<typeof RecommendationSchema>;
+export const UpdateScopeSchema = z.enum(["project", "global"]);
+export const SkillUpdateSchema = z.object({ skillKey: z.string(), name: z.string().optional(), localVersion: z.string(), latestVersion: z.string(), latestVersionId: z.number().int().positive(), scopes: z.array(UpdateScopeSchema), installing: z.boolean().optional() });
+export type SkillUpdate = z.infer<typeof SkillUpdateSchema>;
 
-export const IncomingMessageSchema = z
-  .object({
-    id: z.string(),
-    role: z.enum(["user", "assistant"]).optional(),
-    text: z.string().optional(),
-    parts: z.array(MessagePartSchema.passthrough()).optional(),
-  })
-  .passthrough();
-export type IncomingMessage = z.infer<typeof IncomingMessageSchema>;
-
-export const PermissionSchema = z.object({
-  id: z.string(),
-  permission: z.string(),
-  patterns: z.array(z.string()).optional(),
-  sessionID: z.string(),
-  metadata: z.record(z.string(), z.unknown()),
-  always: z.array(z.string()).optional(),
-  tool: z.object({
-    messageID: z.string(),
-    callID: z.string(),
-  }).optional(),
-});
-export type Permission = z.infer<typeof PermissionSchema>;
-
-export const ContextInfoSchema = z.object({
-  usedTokens: z.number(),
-  limitTokens: z.number(),
-  percentage: z.number(),
-});
-export type ContextInfo = z.infer<typeof ContextInfoSchema>;
-
-export const FileChangesInfoSchema = z.object({
-  fileCount: z.number(),
-  additions: z.number(),
-  deletions: z.number(),
-});
-export type FileChangesInfo = z.infer<typeof FileChangesInfoSchema>;
-
-// Host -> Webview messages
 export const HostMessageSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("init"),
-      ready: z.boolean(),
-      workspaceRoot: z.string().optional(),
-      serverUrl: z.string().optional(),
-      currentSessionId: z.string().nullish(),
-      currentSessionTitle: z.string().optional(),
-      currentSessionMessages: z.array(IncomingMessageSchema).optional(),
-      defaultAgent: z.string().optional(),
-    })
-    .transform((v) => ({
-      ...v,
-      currentSessionId: v.currentSessionId ?? undefined,
-    })),
-  z.object({
-    type: z.literal("error"),
-    message: z.string(),
-  }),
-  // Proxy fetch/SSE messages for CORS bypass
-  z.object({
-    type: z.literal("proxyFetchResult"),
-    id: z.string(),
-    ok: z.boolean(),
-    status: z.number().optional(),
-    statusText: z.string().optional(),
-    headers: z.record(z.string(), z.string()).optional(),
-    bodyText: z.string().optional(),
-    error: z.string().optional(),
-  }),
-  z.object({
-    type: z.literal("sseEvent"),
-    id: z.string(),
-    data: z.string(),
-  }),
-  z.object({
-    type: z.literal("sseError"),
-    id: z.string(),
-    error: z.string(),
-  }),
-  z.object({
-    type: z.literal("sseClosed"),
-    id: z.string(),
-  }),
-  z.object({
-    type: z.literal("sseStatus"),
-    id: z.string(),
-    status: z.enum(["connecting", "connected", "reconnecting", "closed"]),
-    attempt: z.number().optional(),
-    nextRetryMs: z.number().optional(),
-    reason: z.enum(["aborted", "error", "manual"]).optional(),
-  }),
-  z.object({
-    type: z.literal("editor-selection"),
-    filePath: z.string(),
-    fileUrl: z.string(),
-    selection: z
-      .object({
-        startLine: z.number(),
-        endLine: z.number(),
-      })
-      .optional(),
-  }),
-  z.object({
-    type: z.literal("search-files-result"),
-    files: z.array(z.string()),
-  }),
+  z.object({ type: z.literal("state"), authenticated: z.boolean(), loginPending: z.boolean().optional(), userCode: z.string().optional(), osType: OsTypeSchema, sessions: z.array(SessionSchema), currentSessionKey: z.string().optional(), currentRunKey: z.string().optional(), messages: z.array(ChatMessageSchema), recommendations: z.array(RecommendationSchema), skillUpdates: z.array(SkillUpdateSchema).default([]), updatesChecking: z.boolean().default(false), updatesInstalling: z.boolean().default(false), updateError: z.string().optional(), running: z.boolean(), connection: z.enum(["idle", "connecting", "connected", "reconnecting", "closed"]), error: z.string().optional() }),
+  z.object({ type: z.literal("notice"), level: z.enum(["info", "error"]), message: z.string() }),
 ]);
 export type HostMessage = z.infer<typeof HostMessageSchema>;
-
-// Additional webview messages for proxy fetch abort
-export const ProxyFetchAbortSchema = z.object({
-  type: z.literal("proxyFetchAbort"),
-  id: z.string(),
-});
-export type ProxyFetchAbort = z.infer<typeof ProxyFetchAbortSchema>;
-
-// Webview -> Host messages
 export const WebviewMessageSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("ready"),
-  }),
-  z.object({
-    type: z.literal("agent-changed"),
-    agent: z.string(),
-  }),
-  z.object({
-    type: z.literal("open-file"),
-    url: z.string(),
-    startLine: z.number().optional(),
-    endLine: z.number().optional(),
-  }),
-  z.object({
-    type: z.literal("search-files"),
-    query: z.string(),
-  }),
+  z.object({ type: z.literal("ready") }), z.object({ type: z.literal("login") }), z.object({ type: z.literal("logout") }), z.object({ type: z.literal("new-session") }),
+  z.object({ type: z.literal("select-session"), sessionKey: z.string() }), z.object({ type: z.literal("delete-session"), sessionKey: z.string() }),
+  z.object({ type: z.literal("send-message"), content: z.string().trim().min(1).max(10000) }), z.object({ type: z.literal("cancel-run") }),
+  z.object({ type: z.literal("install-skill"), runKey: z.string(), skillKey: z.string() }), z.object({ type: z.literal("install-all"), runKey: z.string() }),
+  z.object({ type: z.literal("open-detail"), detailPath: z.string() }), z.object({ type: z.literal("install-updates"), skillKeys: z.array(z.string()).min(1) }), z.object({ type: z.literal("dismiss-updates") }), z.object({ type: z.literal("retry-updates") }), z.object({ type: z.literal("refresh") }),
 ]);
 export type WebviewMessage = z.infer<typeof WebviewMessageSchema>;
-
-// Helper functions for parsing messages with validation
-export function parseHostMessage(data: unknown): HostMessage | null {
-  const result = HostMessageSchema.safeParse(data);
-  if (result.success) {
-    return result.data;
-  }
-  console.warn("[messages] Invalid host message:", result.error);
-  return null;
-}
-
-export function parseWebviewMessage(data: unknown): WebviewMessage | null {
-  const result = WebviewMessageSchema.safeParse(data);
-  if (result.success) {
-    return result.data;
-  }
-  console.warn("[messages] Invalid webview message:", result.error);
-  return null;
-}
+export function parseHostMessage(data: unknown): HostMessage | null { const result = HostMessageSchema.safeParse(data); return result.success ? result.data : null; }
+export function parseWebviewMessage(data: unknown): WebviewMessage | null { const result = WebviewMessageSchema.safeParse(data); return result.success ? result.data : null; }

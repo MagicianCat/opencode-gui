@@ -10,7 +10,15 @@ tmp/**
 playwright-report/**
 test-results/**
 tests/**
+specs/**
+.bin/**
+opencode.json
+playwright.config.ts
+tsconfig.integration.json
+*.tsbuildinfo
 src/**
+!resources/**
+local-dev-bypass/**
 .gitignore
 .yarnrc
 vite.config.ts

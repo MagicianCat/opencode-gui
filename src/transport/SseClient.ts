@@ -29,6 +29,8 @@ export interface SseClientOptions {
   logger?: SseLogger;
   /** Additional headers to send with the request */
   headers?: Record<string, string>;
+  /** Refreshes authorization after a 401. Called at most once per connection attempt. */
+  onUnauthorized?: () => Promise<Record<string, string>>;
 }
 
 export type SseConnectionState =
@@ -49,7 +51,7 @@ const DEFAULT_BACKOFF_MULTIPLIER = 2;
 
 export class SseClient {
   private readonly url: string;
-  private readonly options: Required<Omit<SseClientOptions, 'logger' | 'onStateChange' | 'onError' | 'headers'>> & Pick<SseClientOptions, 'logger' | 'onStateChange' | 'onError' | 'headers'>;
+  private readonly options: Required<Omit<SseClientOptions, 'logger' | 'onStateChange' | 'onError' | 'headers' | 'onUnauthorized'>> & Pick<SseClientOptions, 'logger' | 'onStateChange' | 'onError' | 'headers' | 'onUnauthorized'>;
   
   private abortController: AbortController | null = null;
   private lastEventId: string | undefined;
@@ -57,6 +59,7 @@ export class SseClient {
   private reconnectAttempt = 0;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  private unauthorizedRetried = false;
 
   constructor(url: string, options: SseClientOptions) {
     this.url = url;
@@ -69,6 +72,7 @@ export class SseClient {
       onError: options.onError,
       logger: options.logger,
       headers: options.headers,
+      onUnauthorized: options.onUnauthorized,
     };
     this.retryMs = this.options.initialRetryMs;
   }
@@ -143,6 +147,19 @@ export class SseClient {
         signal: this.abortController.signal,
       });
 
+      if (response.status === 401 && this.options.onUnauthorized && !this.unauthorizedRetried) {
+        this.unauthorizedRetried = true;
+        this.options.headers = await this.options.onUnauthorized();
+        throw new Error('SSE authorization refreshed');
+      }
+      if (response.status === 401) {
+        const error = new Error('SSE 登录已失效');
+        this.closed = true;
+        this.setState({ status: 'closed', reason: 'error' });
+        this.options.onError?.(error);
+        return;
+      }
+
       if (!response.ok) {
         throw new Error(`SSE connection failed: ${response.status} ${response.statusText}`);
       }
@@ -153,6 +170,7 @@ export class SseClient {
 
       // Connection successful - reset retry state
       this.reconnectAttempt = 0;
+      this.unauthorizedRetried = false;
       this.retryMs = this.options.initialRetryMs;
       this.setState({ status: 'connected' });
       this.log('info', 'Connected successfully');

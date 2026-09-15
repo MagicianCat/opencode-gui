@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-skill-usage.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

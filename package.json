@@ -1,13 +1,13 @@
 {
-  "name": "opencode-vscode",
-  "displayName": "OpenCode GUI",
-  "description": "OpenCode AI coding agent for VSCode GUI extension",
+  "name": "yantu-assistant",
+  "displayName": "研途助手",
+  "description": "连接内部研发助手平台的 CodeBuddy IDE 对话扩展",
   "version": "0.4.3",
-  "publisher": "TanishqKancharla",
+  "publisher": "skill-platform",
   "icon": "media/logo.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/saffron-health/opencode-vscode-extension.git"
+    "url": "https://github.com/MagicianCat/opencode-gui.git"
   },
   "engines": {
     "vscode": "^1.74.0"
@@ -16,42 +16,43 @@
     "Other",
     "AI"
   ],
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "opencode",
-          "title": "OpenCode",
+          "id": "yantu-assistant",
+          "title": "研途助手",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "opencode": [
+      "yantu-assistant": [
         {
           "type": "webview",
-          "id": "opencode.chatView",
-          "name": ""
+          "id": "yantu-assistant.chatView",
+          "name": "研途助手"
         }
       ]
     },
-    "commands": [
-      {
-        "command": "opencode.addSelectionToPrompt",
-        "title": "Add Selection to Prompt",
-        "category": "OpenCode"
-      }
-    ],
-    "menus": {
-      "editor/context": [
-        {
-          "command": "opencode.addSelectionToPrompt",
-          "when": "editorTextFocus",
-          "group": "navigation@9"
+    "configuration": {
+      "title": "研途助手",
+      "properties": {
+        "yantuAssistant.apiBaseUrl": {
+          "type": "string",
+          "scope": "machine",
+          "default": "http://127.0.0.1:8090/api/v1",
+          "description": "研发助手平台 API 地址"
+        },
+        "yantuAssistant.webBaseUrl": {
+          "type": "string",
+          "scope": "machine",
+          "default": "http://127.0.0.1:5173",
+          "description": "研发助手平台网页地址"
         }
-      ]
+      }
     }
   },
   "scripts": {
@@ -63,17 +64,16 @@
     "watch:extension": "vite build --config vite.config.extension.ts --watch --mode development",
     "watch:webview": "vite build --config vite.config.ts --watch --mode development",
     "clean": "rm -rf dist out",
-    "dev": "tsx scripts/dev.ts",
     "dev:webview": "vite",
-    "dev:standalone": "vite --open /src/webview/standalone.html",
-    "uikit": "vite --open /src/webview/uikit.html",
     "test": "vitest run && playwright test",
     "test:integration": "tsc -p tsconfig.integration.json && node out/tests/integration/runTests.js",
     "test:integration:compile": "tsc -p tsconfig.integration.json",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "debug:extension": "tsx scripts/debug-extension.ts",
-    "demo:standalone": "./scripts/demo-standalone.sh",
+    "dev:codebuddy-bypass:install": "node local-dev-bypass/codebuddy-hook-bypass.mjs install",
+    "dev:codebuddy-bypass:uninstall": "node local-dev-bypass/codebuddy-hook-bypass.mjs uninstall",
+    "dev:codebuddy-bypass:status": "node local-dev-bypass/codebuddy-hook-bypass.mjs status",
+    "test:codebuddy-bypass": "node --test local-dev-bypass/codebuddy-hook-bypass.test.mjs",
     "package": "vsce package",
     "publish": "vsce publish --skip-duplicate --no-dependencies && source .env && ovsx publish -p \"$OPEN_VSX_KEY\" --no-dependencies",
     "publish:pre": "vsce publish --pre-release --no-dependencies && source .env && ovsx publish --pre-release -p \"$OPEN_VSX_KEY\" --no-dependencies",
@@ -82,6 +82,7 @@
   "devDependencies": {
     "@playwright/test": "^1.50.0",
     "@types/mocha": "^10.x",
+    "@types/hast": "^3.0.4",
     "@types/node": "^20.x",
     "@types/vscode": "^1.74.0",
     "@vscode/test-electron": "^2.4.1",
@@ -96,14 +97,6 @@
     "vitest": "^1.x"
   },
   "dependencies": {
-    "@floating-ui/dom": "^1.7.5",
-    "@opencode-ai/sdk": "^1.2.14",
-    "@tiptap/core": "^2.27.2",
-    "@tiptap/extension-document": "^2.27.2",
-    "@tiptap/extension-mention": "^2.27.2",
-    "@tiptap/extension-paragraph": "^2.27.2",
-    "@tiptap/extension-text": "^2.27.2",
-    "@tiptap/suggestion": "^2.27.2",
     "marked": "^17.0.1",
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
@@ -112,7 +105,6 @@
     "remark-rehype": "^11.1.2",
     "shiki": "^3.19.0",
     "solid-js": "^1.9.10",
-    "tiptap-solid": "^1.2.1",
     "unified": "^11.0.5",
     "vite-plugin-solid": "^2.11.10",
     "zod": "^4.3.5"

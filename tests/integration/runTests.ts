@@ -35,6 +35,9 @@ async function main() {
       extensionDevelopmentPath,
       extensionTestsPath,
       launchArgs,
+      ...(process.env.VSCODE_EXECUTABLE_PATH
+        ? { vscodeExecutablePath: process.env.VSCODE_EXECUTABLE_PATH }
+        : {}),
       // Set this to run in headed mode when interactive (not in CI)
       version: process.env.VSCODE_VERSION || 'stable',
     });

@@ -1,5 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const loopbackNoProxy = [process.env.NO_PROXY, "127.0.0.1", "localhost"]
+  .filter(Boolean)
+  .join(",");
+process.env.NO_PROXY = loopbackNoProxy;
+process.env.no_proxy = loopbackNoProxy;
+
 export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: true,
@@ -8,7 +14,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: "html",
   use: {
-    baseURL: "http://localhost:5199",
+    baseURL: "http://127.0.0.1:5199",
     trace: "on-first-retry",
   },
   projects: [
@@ -31,8 +37,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev:webview --port 5199 --strictPort",
-    url: "http://localhost:5199/src/webview/index.html",
+    command: "npm run dev:webview -- --host 127.0.0.1 --port 5199 --strictPort",
+    url: "http://127.0.0.1:5199/src/webview/index.html",
     reuseExistingServer: !process.env.CI,
     timeout: 120000,
   },

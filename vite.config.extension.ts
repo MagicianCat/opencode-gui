@@ -46,8 +46,4 @@ export default defineConfig({
   resolve: {
     conditions: ['node', 'import', 'module', 'default'],
   },
-  ssr: {
-    // Tell Vite this is a Node.js environment
-    noExternal: ['@opencode-ai/sdk'],
-  },
 });

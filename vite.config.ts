@@ -19,10 +19,7 @@ export default defineConfig({
     outDir: 'out',
     minify: false,
     rollupOptions: {
-      input: {
-        main: resolve(__dirname, 'src/webview/index.html'),
-        uikit: resolve(__dirname, 'src/webview/uikit.html')
-      },
+      input: { main: resolve(__dirname, 'src/webview/index.html') },
       output: {
         entryFileNames: '[name].js',
         assetFileNames: (assetInfo) => {

@@ -1,0 +1,12 @@
+{
+  "name": "yantu-assistant-local",
+  "owner": { "name": "Yantu Assistant" },
+  "plugins": [
+    {
+      "name": "yantu-assistant-telemetry",
+      "source": "./plugins/yantu-assistant-telemetry",
+      "description": "CodeBuddy Skill usage telemetry for Yantu Assistant",
+      "version": "0.1.0"
+    }
+  ]
+}

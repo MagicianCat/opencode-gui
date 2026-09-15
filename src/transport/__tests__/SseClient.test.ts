@@ -31,7 +31,7 @@ interface TestFixtures {
 }
 
 const test = base.extend<TestFixtures>({
-  mockFetch: async ({}, use) => {
+  mockFetch: async ({}, use: (value: ReturnType<typeof vi.fn>) => Promise<void>) => {
     const mockFetch = vi.fn();
     vi.stubGlobal('fetch', mockFetch);
     await use(mockFetch);
@@ -40,6 +40,14 @@ const test = base.extend<TestFixtures>({
 });
 
 describe('SseClient', () => {
+  test('refreshes authorization once after 401', async ({ mockFetch }) => {
+    const refresh = vi.fn().mockResolvedValue({ Authorization: 'Bearer fresh' });
+    mockFetch.mockResolvedValueOnce(createMockResponse([], 401)).mockResolvedValueOnce(createMockResponse(['data: ok\n\n']));
+    const events: SseEvent[] = [];
+    const client = new SseClient('http://localhost/events', { initialRetryMs: 1, headers: { Authorization: 'Bearer old' }, onUnauthorized: refresh, onEvent: event => events.push(event) });
+    client.connect(); await vi.waitFor(() => expect(events).toHaveLength(1)); client.close();
+    expect(refresh).toHaveBeenCalledTimes(1); expect(mockFetch.mock.calls[1]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer fresh' });
+  });
   describe('SSE parsing', () => {
     test('should parse simple data events', async ({ mockFetch }) => {
       const events: SseEvent[] = [];
