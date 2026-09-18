@@ -23,14 +23,20 @@ try {
   if (typeof skillKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillKey)) process.exit(0);
   const skillDirectory = extractSkillDirectory(payload.tool_response);
   if (!skillDirectory) process.exit(0);
-  const markerPath = path.join(skillDirectory, ".yantu-platform-skill.json");
-  const marker = await readJson(markerPath);
-  if (!marker || marker.source !== "yantu-platform" || marker.skillKey !== skillKey) process.exit(0);
+  // CodeBuddy may materialize a project-local copy of a globally installed skill.
+  // The copy does not carry our marker, so resolve the marker by skill key as a
+  // fallback instead of treating the local copy as an untracked skill.
+  const marker = await findPlatformMarker(skillDirectory, skillKey);
+  if (!marker) process.exit(0);
 
   const eventId = randomUUID();
   const transcriptPath = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
   const messageIds = transcriptPath ? await transcriptMessageIds(transcriptPath) : [];
-  const localDirectory = workspaceDirectoryFromPayload(payload) || (transcriptPath ? await workspaceDirectory(transcriptPath, messageIds) : "");
+  // CodeBuddy's hook process may report `/` (or the skill directory) as cwd when
+  // a globally installed skill is materialized. The conversation's Workspace
+  // Folder is the authoritative project directory; payload cwd is only a
+  // fallback for payloads without a readable transcript.
+  const localDirectory = (transcriptPath ? await workspaceDirectory(transcriptPath, messageIds) : "") || workspaceDirectoryFromPayload(payload, skillDirectory);
   const metadataPath = path.join(metadataDir, `${eventId}.json`);
   const conversationFile = path.join(conversationDir, `${eventId}.json.gz`);
   const metadata = {
@@ -92,10 +98,18 @@ async function workspaceDirectory(transcriptPath, messageIds) {
   return "";
 }
 
-function workspaceDirectoryFromPayload(payload) {
+function workspaceDirectoryFromPayload(payload, skillDirectory) {
   const candidates = [payload?.cwd, payload?.workspace_path, payload?.workspace_folder, payload?.tool_input?.cwd];
-  return candidates.find(value => typeof value === "string" && path.isAbsolute(value) && value.trim())?.trim() || "";
+  return candidates.find(value => {
+    if (typeof value !== "string" || !path.isAbsolute(value) || !value.trim()) return false;
+    const candidate = path.normalize(value.trim());
+    if (candidate === path.parse(candidate).root) return false;
+    if (skillDirectory && isPathWithin(candidate, path.normalize(skillDirectory))) return false;
+    return true;
+  })?.trim() || "";
 }
+
+function isPathWithin(candidate, parent) { return candidate === parent || candidate.startsWith(`${parent}${path.sep}`); }
 
 function findCurrentSkillBoundary(records, skillKey) {
   for (let index = records.length - 1; index >= 0; index -= 1) {
@@ -124,6 +138,14 @@ function parseMessage(record) {
 
 function parseNestedMessage(record) { try { return JSON.parse(record?.message ?? "{}"); } catch { return null; } }
 async function readJson(file) { try { return JSON.parse(await fs.readFile(file, "utf8")); } catch { return null; } }
+async function findPlatformMarker(skillDirectory, skillKey) {
+  const localMarker = await readJson(path.join(skillDirectory, ".yantu-platform-skill.json"));
+  if (isPlatformMarker(localMarker, skillKey)) return localMarker;
+
+  const globalMarker = await readJson(path.join(os.homedir(), ".codebuddy", "skills", skillKey, ".yantu-platform-skill.json"));
+  return isPlatformMarker(globalMarker, skillKey) ? globalMarker : null;
+}
+function isPlatformMarker(marker, skillKey) { return marker?.source === "yantu-platform" && marker?.skillKey === skillKey; }
 function extractSkillDirectory(response) { const text = typeof response === "string" ? response : response?.message; const match = typeof text === "string" ? text.match(/Base directory for this skill:\s*([^\n\r]+)/) : null; return match?.[1]?.trim(); }
 function string(value) { return typeof value === "string" ? value : undefined; }
 function number(value) { return typeof value === "number" ? value : undefined; }
