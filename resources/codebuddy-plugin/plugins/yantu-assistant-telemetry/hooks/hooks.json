@@ -1,5 +1,21 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/probe-hook.mjs UserPromptSubmit",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-generation.mjs UserPromptSubmit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Skill",
@@ -8,6 +24,60 @@
             "type": "command",
             "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-skill-usage.mjs",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-generation.mjs Skill",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-file-diff.mjs Post",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-file-diff.mjs Pre",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-generation.mjs ToolFailure",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/probe-hook.mjs Stop",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node ${CODEBUDDY_PLUGIN_ROOT}/scripts/capture-generation.mjs Stop",
+            "timeout": 10
           }
         ]
       }

@@ -105,6 +105,9 @@ export class PlatformClient {
     const { conversationFile: _conversationFile, transcriptPath: _transcriptPath, messageIds: _messageIds, ...body } = metadata;
     await this.request("/telemetry/skill-usage-events", { method: "POST", headers: { "Idempotency-Key": metadata.eventId }, body: JSON.stringify(body) });
   }
+  async recordGeneration(payload: Record<string, unknown>): Promise<void> {
+    await this.request("/telemetry/generations", { method: "POST", body: JSON.stringify(payload) });
+  }
   async uploadSkillUsageConversation(eventId: string, compressed: Buffer): Promise<void> {
     await this.authorizedFetch(`/telemetry/skill-usage-events/${encodeURIComponent(eventId)}/conversation`, { method: "PUT", headers: { "Content-Type": "application/json", "Content-Encoding": "gzip" }, body: compressed as unknown as BodyInit });
   }
