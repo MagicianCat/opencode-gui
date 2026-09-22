@@ -15,7 +15,7 @@ export const SkillUpdateSchema = z.object({ skillKey: z.string(), name: z.string
 export type SkillUpdate = z.infer<typeof SkillUpdateSchema>;
 
 export const HostMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("state"), authenticated: z.boolean(), loginPending: z.boolean().optional(), userCode: z.string().optional(), osType: OsTypeSchema, sessions: z.array(SessionSchema), currentSessionKey: z.string().optional(), currentRunKey: z.string().optional(), messages: z.array(ChatMessageSchema), recommendations: z.array(RecommendationSchema), skillUpdates: z.array(SkillUpdateSchema).default([]), updatesChecking: z.boolean().default(false), updatesInstalling: z.boolean().default(false), updateError: z.string().optional(), running: z.boolean(), connection: z.enum(["idle", "connecting", "connected", "reconnecting", "closed"]), error: z.string().optional() }),
+  z.object({ type: z.literal("state"), authenticated: z.boolean(), loginPending: z.boolean().optional(), userCode: z.string().optional(), osType: OsTypeSchema, sessions: z.array(SessionSchema), currentSessionKey: z.string().optional(), currentRunKey: z.string().optional(), messages: z.array(ChatMessageSchema), recommendations: z.array(RecommendationSchema), confirmationInstalledKeys: z.array(z.string()).default([]), skillUpdates: z.array(SkillUpdateSchema).default([]), updatesChecking: z.boolean().default(false), updatesInstalling: z.boolean().default(false), updateError: z.string().optional(), running: z.boolean(), connection: z.enum(["idle", "connecting", "connected", "reconnecting", "closed"]), error: z.string().optional() }),
   z.object({ type: z.literal("notice"), level: z.enum(["info", "error"]), message: z.string() }),
 ]);
 export type HostMessage = z.infer<typeof HostMessageSchema>;
@@ -24,6 +24,7 @@ export const WebviewMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("select-session"), sessionKey: z.string() }), z.object({ type: z.literal("delete-session"), sessionKey: z.string() }),
   z.object({ type: z.literal("send-message"), content: z.string().trim().min(1).max(10000) }), z.object({ type: z.literal("cancel-run") }),
   z.object({ type: z.literal("install-skill"), runKey: z.string(), skillKey: z.string() }), z.object({ type: z.literal("install-all"), runKey: z.string() }),
+  z.object({ type: z.literal("install-confirmation-skills"), skillKeys: z.array(z.string()).min(1) }),
   z.object({ type: z.literal("open-detail"), detailPath: z.string() }), z.object({ type: z.literal("install-updates"), skillKeys: z.array(z.string()).min(1) }), z.object({ type: z.literal("dismiss-updates") }), z.object({ type: z.literal("retry-updates") }), z.object({ type: z.literal("refresh") }),
 ]);
 export type WebviewMessage = z.infer<typeof WebviewMessageSchema>;

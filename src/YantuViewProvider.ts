@@ -12,13 +12,25 @@ import { parseBundleDescriptor, SkillInstaller } from "./skills/SkillInstaller";
 import { getLogger, machineSetting } from "./extension";
 import { SerialTaskQueue } from "./utils/SerialTaskQueue";
 
-interface ViewState { authenticated: boolean; loginPending?: boolean; userCode?: string; osType: OsType; sessions: Session[]; currentSessionKey?: string; currentRunKey?: string; messages: ChatMessage[]; recommendations: Recommendation[]; skillUpdates: SkillUpdate[]; updatesChecking: boolean; updatesInstalling: boolean; updateError?: string; running: boolean; connection: "idle" | "connecting" | "connected" | "reconnecting" | "closed"; error?: string; }
+interface ViewState { authenticated: boolean; loginPending?: boolean; userCode?: string; osType: OsType; sessions: Session[]; currentSessionKey?: string; currentRunKey?: string; messages: ChatMessage[]; recommendations: Recommendation[]; confirmationInstalledKeys: string[]; skillUpdates: SkillUpdate[]; updatesChecking: boolean; updatesInstalling: boolean; updateError?: string; running: boolean; connection: "idle" | "connecting" | "connected" | "reconnecting" | "closed"; error?: string; }
 interface UpdateCandidate extends SkillUpdate { versionIds: number[]; targets: Array<{ directory: string; scope: "project" | "global" }>; }
+
+// Mock-only entry for the confirmation-letter analysis scenario. The version IDs
+// are deliberately kept here until this scenario is wired to a dynamic catalog.
+const CONFIRMATION_SKILLS: Record<string, number> = {
+  "confirmation-ba": 270,
+  "req-confirm": 271,
+  "req-evaluation": 272,
+  "req-input": 273,
+  "req-prototype": 274,
+  "req-supplement": 275,
+  "requirement-clarification-summary": 276,
+};
 
 export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = "yantu-assistant.chatView";
   private view?: vscode.WebviewView; private sse?: SseClient; private loginAttempt?: DeviceLogin; private disposed = false; private readonly installer = new SkillInstaller(); private readonly eventQueue = new SerialTaskQueue(error => this.fail(error));
-  private state: ViewState = { authenticated: false, osType: detectOs(), sessions: [], messages: [], recommendations: [], skillUpdates: [], updatesChecking: false, updatesInstalling: false, running: false, connection: "idle" };
+  private state: ViewState = { authenticated: false, osType: detectOs(), sessions: [], messages: [], recommendations: [], confirmationInstalledKeys: [], skillUpdates: [], updatesChecking: false, updatesInstalling: false, running: false, connection: "idle" };
   private updateCandidates: UpdateCandidate[] = [];
   constructor(private readonly extensionUri: vscode.Uri, private readonly client: PlatformClient) {}
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -31,7 +43,7 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     switch (message.type) {
       case "ready": case "refresh": await this.bootstrap(); break;
       case "login": await this.login(); break;
-      case "logout": this.loginAttempt?.cancel(); this.sse?.close(); await this.client.logout(); this.updateCandidates = []; this.state = { ...this.state, authenticated: false, loginPending: false, userCode: undefined, sessions: [], messages: [], recommendations: [], skillUpdates: [], updatesChecking: false, updatesInstalling: false, running: false, currentRunKey: undefined, currentSessionKey: undefined }; this.sendState(); break;
+      case "logout": this.loginAttempt?.cancel(); this.sse?.close(); await this.client.logout(); this.updateCandidates = []; this.state = { ...this.state, authenticated: false, loginPending: false, userCode: undefined, sessions: [], messages: [], recommendations: [], confirmationInstalledKeys: [], skillUpdates: [], updatesChecking: false, updatesInstalling: false, running: false, currentRunKey: undefined, currentSessionKey: undefined }; this.sendState(); break;
       case "new-session": await this.newSession(); break;
       case "select-session": await this.selectSession(message.sessionKey); break;
       case "delete-session": await this.client.deleteSession(message.sessionKey); await this.bootstrap(); break;
@@ -39,6 +51,7 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       case "cancel-run": if (this.state.currentRunKey) await this.client.cancelRun(this.state.currentRunKey); break;
       case "install-skill": await this.install(message.runKey, [message.skillKey]); break;
       case "install-all": await this.install(message.runKey, [...new Set(this.state.recommendations.filter(item => item.status === "missing" || item.status === "update").map(item => item.skillKey))]); break;
+      case "install-confirmation-skills": await this.installConfirmationSkills(message.skillKeys); break;
       case "open-detail": await this.openDetail(message.detailPath); break;
       case "install-updates": await this.installUpdates(message.skillKeys); break;
       case "dismiss-updates": this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.sendState(); break;
@@ -47,7 +60,7 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   }
   private async bootstrap(): Promise<void> {
     this.state.authenticated = await this.client.restore(); this.state.error = undefined;
-    if (this.state.authenticated) { this.state.sessions = await this.client.sessions(); if (this.state.currentSessionKey && this.state.sessions.some(item => item.sessionKey === this.state.currentSessionKey)) await this.selectSession(this.state.currentSessionKey); }
+    if (this.state.authenticated) { this.state.sessions = await this.client.sessions(); await this.refreshConfirmationInstallStatus(); if (this.state.currentSessionKey && this.state.sessions.some(item => item.sessionKey === this.state.currentSessionKey)) await this.selectSession(this.state.currentSessionKey); }
     this.sendState();
     if (this.state.authenticated && (!this.state.currentSessionKey || this.state.messages.length === 0)) void this.checkSkillUpdates();
   }
@@ -82,6 +95,28 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     const existing = skillKeys.filter(key => existsSync(path.join(directory, key))); if (existing.length) { const answer = await vscode.window.showWarningMessage(`以下 Skill 已存在，将被覆盖：${existing.join("、")}`, { modal: true }, "确认覆盖"); if (answer !== "确认覆盖") return; }
     const confirmed = await vscode.window.showInformationMessage(`安装 ${skillKeys.join("、")} 到 ${directory}？依赖项也会一并安装。`, { modal: true }, "安装"); if (confirmed !== "安装") return;
     const metadata = await this.client.createBundle(runKey, this.state.osType, skillKeys); const status = string(metadata.resultStatus) ?? string(metadata.status); const failures = Array.isArray(metadata.failures) ? metadata.failures.map(failureMessage).filter(Boolean) : []; if (status === "FAILED" || status === "BUILDING") throw new Error(status === "BUILDING" ? "Bundle 尚未生成完成" : `Bundle 生成失败${failures.length ? `：${failures.join("；")}` : ""}`); if (status && !["AVAILABLE", "COMPLETE", "PARTIAL"].includes(status)) throw new Error(`不支持的 Bundle 状态：${status}`); if (failures.length) this.notice("error", `部分 Skill 无法打包：${failures.join("；")}`); const descriptor = parseBundleDescriptor(metadata); if (!descriptor.items.length) throw new Error("Bundle 没有可安装项"); const id = metadata.id ?? metadata.bundleId; if (typeof id !== "number" && typeof id !== "string") throw new Error("Bundle 缺少下载 ID"); const bundle = await this.client.downloadBundle(id); const installed = await this.installer.install(bundle, descriptor, directory); this.notice("info", `已安装：${installed.join("、")}`); this.state.recommendations = addInstallStatus(this.state.recommendations, await scanSkills(this.projectRoot())); this.sendState();
+  }
+  private async installConfirmationSkills(skillKeys: string[]): Promise<void> {
+    const selected = [...new Set(skillKeys)].filter(skillKey => CONFIRMATION_SKILLS[skillKey]);
+    if (!selected.length) { this.notice("info", "没有可下载的确认函需求分析 Skill"); return; }
+    const scope = await vscode.window.showQuickPick(this.projectRoot() ? [{ label: "项目", description: "安装到当前项目 .codebuddy/skills", value: "project" }, { label: "全局", description: "安装到用户目录 ~/.codebuddy/skills", value: "global" }] : [{ label: "全局", description: "当前未打开项目", value: "global" }], { placeHolder: "选择确认函需求分析 Skill 安装位置" });
+    if (!scope) return;
+    const root = scope.value === "project" ? await this.chooseProjectRoot() : os.homedir(); if (!root) return;
+    const directory = path.join(root, ".codebuddy", "skills");
+    const existing = selected.filter(key => existsSync(path.join(directory, key)));
+    if (existing.length) { const answer = await vscode.window.showWarningMessage(`以下 Skill 已存在，将被覆盖：${existing.join("、")}`, { modal: true }, "确认覆盖"); if (answer !== "确认覆盖") return; }
+    const confirmed = await vscode.window.showInformationMessage(`下载 ${selected.length} 个确认函需求分析 Skill 到 ${directory}？`, { modal: true }, "下载"); if (confirmed !== "下载") return;
+    const metadata = await this.client.createSkillUpdateBundle(this.state.osType, selected.map(skillKey => CONFIRMATION_SKILLS[skillKey]));
+    const status = string(metadata.resultStatus) ?? string(metadata.status);
+    if (status === "FAILED" || status === "BUILDING") throw new Error(status === "BUILDING" ? "确认函需求分析 Skill Bundle 尚未生成完成" : "确认函需求分析 Skill 尚未发布，暂时无法下载");
+    const descriptor = parseBundleDescriptor(metadata); if (!descriptor.items.length) throw new Error("确认函需求分析 Skill Bundle 没有可安装项");
+    const id = metadata.id ?? metadata.bundleId; if (typeof id !== "number" && typeof id !== "string") throw new Error("确认函需求分析 Skill Bundle 缺少下载 ID");
+    const installed = await this.installer.install(await this.client.downloadBundle(id), descriptor, directory);
+    await this.refreshConfirmationInstallStatus(); this.notice("info", `已下载：${installed.join("、")}`); this.sendState();
+  }
+  private async refreshConfirmationInstallStatus(): Promise<void> {
+    const local = await scanSkills(this.projectRoot());
+    this.state.confirmationInstalledKeys = Object.keys(CONFIRMATION_SKILLS).filter(skillKey => local.some(item => item.skillKey === skillKey && item.scope === "project"));
   }
   private async checkSkillUpdates(): Promise<void> {
     if (!this.state.authenticated || this.state.updatesInstalling) return;
