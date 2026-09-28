@@ -1,0 +1,12 @@
+{
+  "name": "yantu-hook-probe-local",
+  "owner": { "name": "Yantu Assistant" },
+  "plugins": [
+    {
+      "name": "yantu-hook-probe",
+      "source": "./plugins/yantu-hook-probe",
+      "description": "Yantu Assistant local Hook carrier",
+      "version": "0.0.3"
+    }
+  ]
+}

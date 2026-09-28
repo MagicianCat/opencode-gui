@@ -1,0 +1,6 @@
+{
+  "name": "yantu-hook-probe",
+  "version": "0.0.3",
+  "description": "Yantu Assistant local Hook carrier",
+  "hooks": "./hooks/hooks.json"
+}

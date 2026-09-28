@@ -11,6 +11,9 @@ out
 .codex/environments/
 
 OpenCode.log
+*.tsbuildinfo
+.idea/
+resources/codebuddy-plugin/.plugins-cache.json
 # Playwright test artifacts
 test-results/
 playwright-report/
