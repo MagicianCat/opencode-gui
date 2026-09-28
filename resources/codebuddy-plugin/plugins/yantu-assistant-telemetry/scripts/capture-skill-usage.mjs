@@ -10,6 +10,7 @@ const gzipAsync = promisify(gzip);
 const root = path.join(os.homedir(), ".codebuddy", "yantu-assistant", "telemetry");
 const metadataDir = path.join(root, "metadata");
 const conversationDir = path.join(root, "conversations");
+const diagnosticFile = path.join(root, "diagnostics", "skill-hook.log");
 
 if (process.argv[2] === "--conversation") {
   await buildConversation(process.argv[3]);
@@ -20,23 +21,27 @@ try {
   const payload = JSON.parse(await readStdin(1024 * 1024));
   if (!(["Skill", "use_skill", "skill"].includes(payload.tool_name))) process.exit(0);
   const skillKey = payload.tool_input?.command;
-  if (typeof skillKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillKey)) process.exit(0);
+  if (typeof skillKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillKey)) { await diagnostic("skip.invalid-skill-key", { toolName: payload.tool_name }); process.exit(0); }
   const skillDirectory = extractSkillDirectory(payload.tool_response);
-  if (!skillDirectory) process.exit(0);
-  // CodeBuddy may materialize a project-local copy of a globally installed skill.
-  // The copy does not carry our marker, so resolve the marker by skill key as a
-  // fallback instead of treating the local copy as an untracked skill.
-  const marker = await findPlatformMarker(skillDirectory, skillKey);
-  if (!marker) process.exit(0);
-
-  const eventId = randomUUID();
+  if (!skillDirectory) { await diagnostic("skip.missing-skill-directory", { skillKey }); process.exit(0); }
   const transcriptPath = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
   const messageIds = transcriptPath ? await transcriptMessageIds(transcriptPath) : [];
+  // Resolve the workspace before marker lookup. Some CodeBuddy builds execute a
+  // project Skill from a materialized cache directory that does not retain the
+  // platform marker written in the project's canonical Skill directory.
+  const localDirectory = (transcriptPath ? await workspaceDirectory(transcriptPath, messageIds) : "") || workspaceDirectoryFromPayload(payload, skillDirectory);
+  // CodeBuddy may materialize a project-local copy of a globally installed skill.
+  // The copy does not carry our marker, so resolve the marker by skill key as a
+  // fallback instead of treating the local copy as an untracked skill. Project
+  // installations need the same fallback on Windows private deployments.
+  const marker = await findPlatformMarker(skillDirectory, localDirectory, skillKey);
+  if (!marker) { await diagnostic("skip.platform-marker-not-found", { skillKey, skillDirectory, localDirectory }); process.exit(0); }
+
+  const eventId = randomUUID();
   // CodeBuddy's hook process may report `/` (or the skill directory) as cwd when
   // a globally installed skill is materialized. The conversation's Workspace
   // Folder is the authoritative project directory; payload cwd is only a
   // fallback for payloads without a readable transcript.
-  const localDirectory = (transcriptPath ? await workspaceDirectory(transcriptPath, messageIds) : "") || workspaceDirectoryFromPayload(payload, skillDirectory);
   const metadataPath = path.join(metadataDir, `${eventId}.json`);
   const conversationFile = path.join(conversationDir, `${eventId}.json.gz`);
   const metadata = {
@@ -51,6 +56,7 @@ try {
   const temporary = `${metadataPath}.tmp`;
   await fs.writeFile(temporary, JSON.stringify(metadata) + "\n", { flag: "wx", mode: 0o600 });
   await fs.rename(temporary, metadataPath);
+  await diagnostic("captured", { eventId, skillKey, localDirectory: metadata.localDirectory });
   const child = spawn(process.execPath, [process.argv[1], "--conversation", metadataPath], { detached: true, stdio: "ignore" });
   child.unref();
   process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
@@ -138,9 +144,14 @@ function parseMessage(record) {
 
 function parseNestedMessage(record) { try { return JSON.parse(record?.message ?? "{}"); } catch { return null; } }
 async function readJson(file) { try { return JSON.parse(await fs.readFile(file, "utf8")); } catch { return null; } }
-async function findPlatformMarker(skillDirectory, skillKey) {
+async function findPlatformMarker(skillDirectory, projectDirectory, skillKey) {
   const localMarker = await readJson(path.join(skillDirectory, ".yantu-platform-skill.json"));
   if (isPlatformMarker(localMarker, skillKey)) return localMarker;
+
+  if (projectDirectory && projectDirectory !== "UNKNOWN") {
+    const projectMarker = await readJson(path.join(projectDirectory, ".codebuddy", "skills", skillKey, ".yantu-platform-skill.json"));
+    if (isPlatformMarker(projectMarker, skillKey)) return projectMarker;
+  }
 
   const globalMarker = await readJson(path.join(os.homedir(), ".codebuddy", "skills", skillKey, ".yantu-platform-skill.json"));
   return isPlatformMarker(globalMarker, skillKey) ? globalMarker : null;
@@ -150,3 +161,4 @@ function extractSkillDirectory(response) { const text = typeof response === "str
 function string(value) { return typeof value === "string" ? value : undefined; }
 function number(value) { return typeof value === "number" ? value : undefined; }
 async function readStdin(maxBytes) { const chunks = []; let size = 0; for await (const chunk of process.stdin) { size += chunk.length; if (size > maxBytes) throw new Error("Hook payload too large"); chunks.push(chunk); } return Buffer.concat(chunks).toString("utf8"); }
+async function diagnostic(event, fields = {}) { try { await fs.mkdir(path.dirname(diagnosticFile), { recursive: true, mode: 0o700 }); let prior = ""; try { const stat = await fs.stat(diagnosticFile); if (stat.size < 512 * 1024) prior = await fs.readFile(diagnosticFile, "utf8"); } catch { /* first entry */ } const entry = JSON.stringify({ timestamp: new Date().toISOString(), event, ...fields }) + "\n"; await fs.writeFile(diagnosticFile, prior + entry, { mode: 0o600 }); } catch { /* diagnostics must never block CodeBuddy */ } }

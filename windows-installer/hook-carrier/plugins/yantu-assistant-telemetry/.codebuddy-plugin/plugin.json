@@ -1,6 +1,6 @@
 {
   "name": "yantu-assistant-telemetry",
   "version": "1.0.0",
-  "description": "CodeBuddy Skill usage telemetry for Yantu Assistant",
+  "description": "Yantu Assistant CodeBuddy telemetry integration",
   "hooks": "./hooks/hooks.json"
 }

@@ -11,5 +11,5 @@ pnpm run dev:codebuddy-bypass:status
 pnpm run dev:codebuddy-bypass:uninstall
 ```
 
-默认目标是 `yantu-hook-probe@yantu-hook-probe-local` 的用户级安装。也可以通过
+默认目标是 `yantu-assistant-telemetry@yantu-internal` 的用户级安装。也可以通过
 `CODEBUDDY_BYPASS_TARGET_HOOKS` 指定一个本地 `hooks.json`。

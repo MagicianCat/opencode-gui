@@ -1,7 +1,16 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
+import { readFileSync } from 'fs';
+
+const profile = process.env.YANTU_BUILD_PROFILE ?? 'local';
+if (!/^[a-z0-9-]+$/i.test(profile)) throw new Error(`Invalid YANTU_BUILD_PROFILE: ${profile}`);
+const buildConfig = JSON.parse(readFileSync(resolve(__dirname, 'config', 'environments', `${profile}.json`), 'utf8')) as { apiBaseUrl: string; webBaseUrl: string };
 
 export default defineConfig({
+  define: {
+    __YANTU_API_BASE_URL__: JSON.stringify(buildConfig.apiBaseUrl),
+    __YANTU_WEB_BASE_URL__: JSON.stringify(buildConfig.webBaseUrl),
+  },
   build: {
     lib: {
       entry: resolve(__dirname, 'src/extension.ts'),

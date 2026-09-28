@@ -1,4 +1,5 @@
 .vscode/**
+.idea/**
 .vscode-test/**
 .vscode-test-debug/**
 .vscode-test-user-data/**
@@ -17,8 +18,11 @@ playwright.config.ts
 tsconfig.integration.json
 *.tsbuildinfo
 src/**
-!resources/**
+resources/codebuddy-plugin/.plugins-cache.json
 local-dev-bypass/**
+windows-installer/**
+scripts/**
+release/**
 .gitignore
 .yarnrc
 vite.config.ts

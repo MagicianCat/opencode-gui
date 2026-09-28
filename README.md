@@ -16,8 +16,8 @@ pnpm package
 
 默认连接：
 
-- API：`http://127.0.0.1:8090/api/v1`
-- Web：`http://127.0.0.1:5173`
+- API：`http://10.154.76.195/api/v1`
+- Web：`http://10.154.76.195`
 
 可以通过 CodeBuddy 设置中的 `yantuAssistant.apiBaseUrl` 和 `yantuAssistant.webBaseUrl` 覆盖。
 

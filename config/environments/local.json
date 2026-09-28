@@ -1,0 +1,4 @@
+{
+  "apiBaseUrl": "http://127.0.0.1:8090/api/v1",
+  "webBaseUrl": "http://127.0.0.1:5173"
+}

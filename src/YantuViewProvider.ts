@@ -4,7 +4,7 @@ import * as os from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { PlatformClient, type DeviceLogin } from "./platform/PlatformClient";
-import { validateServiceBaseUrl } from "./platform/ServiceUrl";
+import { ServiceUrlValidationError, validateServiceBaseUrl } from "./platform/ServiceUrl";
 import { SseClient, type SseEvent } from "./transport/SseClient";
 import { parseWebviewMessage, type ChatMessage, type HostMessage, type OsType, type Recommendation, type Session, type SkillUpdate, type WebviewMessage } from "./shared/messages";
 import { addInstallStatus, compareVersions, scanPlatformSkills, scanSkills, type PlatformSkill } from "./skills/SkillScanner";
@@ -20,7 +20,7 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private view?: vscode.WebviewView; private sse?: SseClient; private loginAttempt?: DeviceLogin; private disposed = false; private readonly installer = new SkillInstaller(); private readonly eventQueue = new SerialTaskQueue(error => this.fail(error));
   private state: ViewState = { authenticated: false, osType: detectOs(), sessions: [], messages: [], recommendations: [], skillUpdates: [], updatesChecking: false, updatesInstalling: false, running: false, connection: "idle" };
   private updateCandidates: UpdateCandidate[] = [];
-  constructor(private readonly extensionUri: vscode.Uri, private readonly client: PlatformClient) {}
+  constructor(private readonly extensionUri: vscode.Uri, private readonly client: PlatformClient, private readonly defaultWebBaseUrl: string) {}
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view; view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "out")] }; view.webview.html = this.html(view.webview);
     view.webview.onDidReceiveMessage(async data => { const message = parseWebviewMessage(data); if (!message) return; try { await this.handle(message); } catch (error) { this.fail(error); } });
@@ -37,8 +37,8 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       case "delete-session": await this.client.deleteSession(message.sessionKey); await this.bootstrap(); break;
       case "send-message": await this.sendMessage(message.content); break;
       case "cancel-run": if (this.state.currentRunKey) await this.client.cancelRun(this.state.currentRunKey); break;
-      case "install-skill": await this.install(message.runKey, [message.skillKey]); break;
-      case "install-all": await this.install(message.runKey, [...new Set(this.state.recommendations.filter(item => item.status === "missing" || item.status === "update").map(item => item.skillKey))]); break;
+      case "install-skill": getLogger().info(`[SkillInstall] 收到单项安装请求 runKey=${message.runKey} skillKey=${message.skillKey}`); await this.install(message.runKey, [message.skillKey]); break;
+      case "install-all": { const skillKeys = [...new Set(this.state.recommendations.filter(item => (item.runKey ?? this.state.currentRunKey) === message.runKey && (item.status === "missing" || item.status === "update")).map(item => item.skillKey))]; getLogger().info(`[SkillInstall] 收到本轮批量安装请求 runKey=${message.runKey} skillCount=${skillKeys.length} skills=${skillKeys.join(",")}`); await this.install(message.runKey, skillKeys); break; }
       case "open-detail": await this.openDetail(message.detailPath); break;
       case "install-updates": await this.installUpdates(message.skillKeys); break;
       case "dismiss-updates": this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.sendState(); break;
@@ -64,24 +64,42 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   }
   private async connectRun(runKey: string): Promise<void> {
     this.sse?.close(); const headers = await this.client.authorizationHeader();
-    this.sse = new SseClient(this.client.runEventsUrl(runKey), { headers, onUnauthorized: () => this.client.refreshAuthorizationHeader(), onEvent: event => this.eventQueue.enqueue(() => this.onEvent(event)), onStateChange: state => { this.state.connection = state.status; this.sendState(); }, onError: error => this.fail(error), logger: getLogger() }); this.sse.connect();
+    this.sse = new SseClient(this.client.runEventsUrl(runKey), { headers, onUnauthorized: () => this.client.refreshAuthorizationHeader(), onEvent: event => this.eventQueue.enqueue(() => this.onEvent(event, runKey)), onStateChange: state => { this.state.connection = state.status; this.sendState(); }, onError: error => this.fail(error), logger: getLogger() }); this.sse.connect();
   }
-  private async onEvent(event: SseEvent): Promise<void> {
+  private async onEvent(event: SseEvent, runKey: string): Promise<void> {
     let payload: Record<string, unknown>; try { const parsed: unknown = JSON.parse(event.data); payload = record(parsed); } catch { return; }
     const type = event.event ?? string(payload.type) ?? string(payload.eventType); const data = record(payload.data ?? payload.payload ?? payload);
     if (type === "message.delta") { const delta = string(data.delta) ?? string(data.content) ?? string(data.text) ?? ""; let assistant = this.state.messages.at(-1); if (!assistant || assistant.role !== "assistant") { assistant = { id: string(data.messageKey) ?? `assistant-${Date.now()}`, role: "assistant", content: "" }; this.state.messages.push(assistant); } assistant.content += delta; }
     else if (type === "tool.started" || type === "tool.completed" || type === "tool.failed") { return; }
-    else if (type === "recommendation.completed") { const raw = Array.isArray(data.items) ? data.items : Array.isArray(payload.items) ? payload.items : []; const recommendations = raw.map(normalizeRecommendation).filter((item): item is Recommendation => item !== null); const local = await scanSkills(this.projectRoot()); this.state.recommendations = [...this.state.recommendations, ...addInstallStatus(recommendations, local)]; }
+    else if (type === "recommendation.completed") { const raw = Array.isArray(data.items) ? data.items : Array.isArray(payload.items) ? payload.items : []; const recommendationRunKey = string(data.runKey) ?? string(payload.runKey) ?? runKey; const recommendations = raw.map(item => normalizeRecommendation(item, recommendationRunKey)).filter((item): item is Recommendation => item !== null); const local = await scanSkills(this.projectRoot()); this.state.recommendations = [...this.state.recommendations, ...addInstallStatus(recommendations, local)]; }
     if (["run.completed", "run.failed", "run.cancelled", "done"].includes(type ?? "")) { this.state.running = false; this.state.connection = "closed"; this.sse?.close(); }
     this.sendState();
   }
   private async install(runKey: string, skillKeys: string[]): Promise<void> {
-    if (!skillKeys.length) { this.notice("info", "没有需要安装的 Skill"); return; }
-    const scope = await vscode.window.showQuickPick(this.projectRoot() ? [{ label: "项目", description: "安装到当前项目 .codebuddy/skills", value: "project" }, { label: "全局", description: "安装到用户目录 ~/.codebuddy/skills", value: "global" }] : [{ label: "全局", description: "当前未打开项目", value: "global" }], { placeHolder: "选择 Skill 安装位置" }); if (!scope) return;
-    const root = scope.value === "project" ? await this.chooseProjectRoot() : os.homedir(); if (!root) return; const directory = path.join(root, ".codebuddy", "skills");
-    const existing = skillKeys.filter(key => existsSync(path.join(directory, key))); if (existing.length) { const answer = await vscode.window.showWarningMessage(`以下 Skill 已存在，将被覆盖：${existing.join("、")}`, { modal: true }, "确认覆盖"); if (answer !== "确认覆盖") return; }
-    const confirmed = await vscode.window.showInformationMessage(`安装 ${skillKeys.join("、")} 到 ${directory}？依赖项也会一并安装。`, { modal: true }, "安装"); if (confirmed !== "安装") return;
-    const metadata = await this.client.createBundle(runKey, this.state.osType, skillKeys); const status = string(metadata.resultStatus) ?? string(metadata.status); const failures = Array.isArray(metadata.failures) ? metadata.failures.map(failureMessage).filter(Boolean) : []; if (status === "FAILED" || status === "BUILDING") throw new Error(status === "BUILDING" ? "Bundle 尚未生成完成" : `Bundle 生成失败${failures.length ? `：${failures.join("；")}` : ""}`); if (status && !["AVAILABLE", "COMPLETE", "PARTIAL"].includes(status)) throw new Error(`不支持的 Bundle 状态：${status}`); if (failures.length) this.notice("error", `部分 Skill 无法打包：${failures.join("；")}`); const descriptor = parseBundleDescriptor(metadata); if (!descriptor.items.length) throw new Error("Bundle 没有可安装项"); const id = metadata.id ?? metadata.bundleId; if (typeof id !== "number" && typeof id !== "string") throw new Error("Bundle 缺少下载 ID"); const bundle = await this.client.downloadBundle(id); const installed = await this.installer.install(bundle, descriptor, directory); this.notice("info", `已安装：${installed.join("、")}`); this.state.recommendations = addInstallStatus(this.state.recommendations, await scanSkills(this.projectRoot())); this.sendState();
+    const logger = getLogger();
+    if (!skillKeys.length) { logger.info(`[SkillInstall] 请求无可安装项 runKey=${runKey}`); this.notice("info", "没有需要安装的 Skill"); return; }
+    logger.info(`[SkillInstall] 开始安装 runKey=${runKey} osType=${this.state.osType} skillCount=${skillKeys.length} skills=${skillKeys.join(",")}`);
+    const scope = await vscode.window.showQuickPick(this.projectRoot() ? [{ label: "项目", description: "安装到当前项目 .codebuddy/skills", value: "project" }, { label: "全局", description: "安装到用户目录 ~/.codebuddy/skills", value: "global" }] : [{ label: "全局", description: "当前未打开项目", value: "global" }], { placeHolder: "选择 Skill 安装位置" });
+    if (!scope) { logger.info(`[SkillInstall] 用户在安装范围选择阶段取消 runKey=${runKey}`); return; }
+    const root = scope.value === "project" ? await this.chooseProjectRoot() : os.homedir();
+    if (!root) { logger.info(`[SkillInstall] 用户在项目目录选择阶段取消 runKey=${runKey} scope=${scope.value}`); return; }
+    const directory = path.join(root, ".codebuddy", "skills");
+    logger.info(`[SkillInstall] 已选择目标 runKey=${runKey} scope=${scope.value} directory=${directory}`);
+    const existing = skillKeys.filter(key => existsSync(path.join(directory, key)));
+    if (existing.length) { logger.info(`[SkillInstall] 检测到目标冲突 runKey=${runKey} skills=${existing.join(",")}`); const answer = await vscode.window.showWarningMessage(`以下 Skill 已存在，将被覆盖：${existing.join("、")}`, { modal: true }, "确认覆盖"); if (answer !== "确认覆盖") { logger.info(`[SkillInstall] 用户取消覆盖 runKey=${runKey}`); return; } }
+    const confirmed = await vscode.window.showInformationMessage(`安装 ${skillKeys.join("、")} 到 ${directory}？依赖项也会一并安装。`, { modal: true }, "安装");
+    if (confirmed !== "安装") { logger.info(`[SkillInstall] 用户在最终确认阶段取消 runKey=${runKey}`); return; }
+    logger.info(`[SkillInstall] 正在创建 Bundle runKey=${runKey}`);
+    const metadata = await this.client.createBundle(runKey, this.state.osType, skillKeys); const status = string(metadata.resultStatus) ?? string(metadata.status); const failures = Array.isArray(metadata.failures) ? metadata.failures.map(failureMessage).filter(Boolean) : []; const id = metadata.id ?? metadata.bundleId;
+    logger.info(`[SkillInstall] Bundle 返回 runKey=${runKey} bundleId=${String(id ?? "missing")} status=${status ?? "unknown"} failureCount=${failures.length}`);
+    if (status === "FAILED" || status === "BUILDING") throw new Error(status === "BUILDING" ? "Bundle 尚未生成完成" : `Bundle 生成失败${failures.length ? `：${failures.join("；")}` : ""}`); if (status && !["AVAILABLE", "COMPLETE", "PARTIAL"].includes(status)) throw new Error(`不支持的 Bundle 状态：${status}`); if (failures.length) this.notice("error", `部分 Skill 无法打包：${failures.join("；")}`); const descriptor = parseBundleDescriptor(metadata); if (!descriptor.items.length) throw new Error("Bundle 没有可安装项"); if (typeof id !== "number" && typeof id !== "string") throw new Error("Bundle 缺少下载 ID");
+    logger.info(`[SkillInstall] 正在下载 Bundle runKey=${runKey} bundleId=${id} itemCount=${descriptor.items.length}`);
+    const bundle = await this.client.downloadBundle(id);
+    logger.info(`[SkillInstall] Bundle 下载完成 runKey=${runKey} bundleId=${id} bytes=${bundle.byteLength}`);
+    logger.info(`[SkillInstall] 正在写入 Skill runKey=${runKey} directory=${directory}`);
+    const installed = await this.installer.install(bundle, descriptor, directory);
+    logger.info(`[SkillInstall] 安装完成 runKey=${runKey} directory=${directory} installed=${installed.join(",")}`);
+    this.notice("info", `已安装：${installed.join("、")}`); this.state.recommendations = addInstallStatus(this.state.recommendations, await scanSkills(this.projectRoot())); this.sendState();
   }
   private async checkSkillUpdates(): Promise<void> {
     if (!this.state.authenticated || this.state.updatesInstalling) return;
@@ -127,9 +145,9 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private async unmarkedCollisions(skillKeys: string[], directory: string): Promise<string[]> { const collisions: string[] = []; for (const key of skillKeys) { const target = path.join(directory, key); if (!existsSync(target)) continue; try { const marker = JSON.parse(readFileSync(path.join(target, ".yantu-platform-skill.json"), "utf8")) as Record<string, unknown>; if (marker.source === "yantu-platform") continue; } catch { /* no marker */ } collisions.push(key); } return collisions; }
   private projectRoot(): string | undefined { const active = vscode.window.activeTextEditor && vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri); return active?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath; }
   private async chooseProjectRoot(): Promise<string | undefined> { const active = vscode.window.activeTextEditor && vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri); if (active) return active.uri.fsPath; const folders = vscode.workspace.workspaceFolders ?? []; if (folders.length <= 1) return folders[0]?.uri.fsPath; const picked = await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, value: folder.uri.fsPath })), { placeHolder: "选择要安装 Skill 的工作区" }); return picked?.value; }
-  private webBaseUrl(): string { return validateServiceBaseUrl(machineSetting("webBaseUrl", "http://127.0.0.1:5173")).toString(); }
+  private webBaseUrl(): string { return validateServiceBaseUrl(machineSetting("webBaseUrl", this.defaultWebBaseUrl)).toString(); }
   private async openDetail(detailPath: string): Promise<void> { const base = new URL(this.webBaseUrl()); const target = new URL(detailPath, base); if (target.origin !== base.origin) throw new Error("Skill 详情链接不属于已配置的平台地址"); await vscode.env.openExternal(vscode.Uri.parse(target.toString())); }
-  private fail(error: unknown): void { const message = error instanceof Error ? error.message : String(error); getLogger().error(message); this.state.error = message; this.state.running = false; this.sendState(); this.notice("error", message); }
+  private fail(error: unknown): void { const message = error instanceof Error ? error.message : String(error); getLogger().error(formatDiagnosticError(error)); this.state.running = false; if (error instanceof ServiceUrlValidationError) { this.state.error = undefined; this.sendState(); return; } this.state.error = message; this.sendState(); this.notice("error", message); }
   private notice(level: "info" | "error", message: string): void { void this.post({ type: "notice", level, message }); }
   private sendState(): void { void this.post({ type: "state", ...this.state }); }
   private post(message: HostMessage): Thenable<boolean> | undefined { return this.view?.webview.postMessage(message); }
@@ -138,7 +156,8 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
 function detectOs(): OsType { return process.platform === "win32" ? "WINDOWS" : process.platform === "darwin" ? "MACOS" : "LINUX"; }
 function record(value: unknown): Record<string, unknown> { return typeof value === "object" && value !== null ? value as Record<string, unknown> : {}; }
 function string(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
-function normalizeRecommendation(value: unknown): Recommendation | null { const item = record(value); const skillKey = string(item.skillKey) ?? string(item.key); if (!skillKey) return null; return { skillKey, name: string(item.name), description: string(item.description), version: string(item.version), versionId: typeof item.versionId === "number" ? item.versionId : undefined, reason: string(item.reason), detailPath: string(item.detailPath), status: "missing" }; }
+function normalizeRecommendation(value: unknown, fallbackRunKey?: string): Recommendation | null { const item = record(value); const skillKey = string(item.skillKey) ?? string(item.key); if (!skillKey) return null; return { skillKey, runKey: string(item.runKey) ?? fallbackRunKey, name: string(item.name), description: string(item.description), version: string(item.version), versionId: typeof item.versionId === "number" ? item.versionId : undefined, reason: string(item.reason), detailPath: string(item.detailPath), status: "missing" }; }
 function failureMessage(value: unknown): string { const failure = record(value); const key = string(failure.skillKey); const message = string(failure.message) ?? string(failure.reason) ?? string(failure.errorMessage); return [key, message].filter(Boolean).join(": "); }
 function isCurrent(local: PlatformSkill, latestVersion: string, latestVersionId: number): boolean { if (local.skillVersionId !== undefined && local.skillVersionId === latestVersionId) return true; return compareVersions(local.version, latestVersion) >= 0; }
 function toPublicUpdate(candidate: UpdateCandidate): SkillUpdate { return { skillKey: candidate.skillKey, name: candidate.name, localVersion: candidate.localVersion, latestVersion: candidate.latestVersion, latestVersionId: candidate.latestVersionId, scopes: candidate.scopes, installing: false }; }
+function formatDiagnosticError(error: unknown): string { if (!(error instanceof Error)) return String(error); const cause = error.cause instanceof Error ? `\nCaused by: ${error.cause.stack ?? error.cause.message}` : error.cause === undefined ? "" : `\nCaused by: ${String(error.cause)}`; return `${error.stack ?? `${error.name}: ${error.message}`}${cause}`; }

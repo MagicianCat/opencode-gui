@@ -2,7 +2,7 @@
   "name": "yantu-assistant",
   "displayName": "研途助手",
   "description": "连接内部研发助手平台的 CodeBuddy IDE 对话扩展",
-  "version": "0.4.3",
+  "version": "0.5.1",
   "publisher": "skill-platform",
   "icon": "media/logo.png",
   "repository": {
@@ -43,14 +43,14 @@
         "yantuAssistant.apiBaseUrl": {
           "type": "string",
           "scope": "machine",
-          "default": "http://127.0.0.1:8090/api/v1",
-          "description": "研发助手平台 API 地址"
+          "default": "",
+          "description": "研发助手平台 API 地址；留空时使用当前构建环境配置"
         },
         "yantuAssistant.webBaseUrl": {
           "type": "string",
           "scope": "machine",
-          "default": "http://127.0.0.1:5173",
-          "description": "研发助手平台网页地址"
+          "default": "",
+          "description": "研发助手平台网页地址；留空时使用当前构建环境配置"
         }
       }
     }
@@ -58,6 +58,8 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "npm run build:extension && npm run build:webview",
+    "build:local": "YANTU_BUILD_PROFILE=local npm run build",
+    "build:server": "YANTU_BUILD_PROFILE=server npm run build",
     "build:extension": "vite build --config vite.config.extension.ts",
     "build:webview": "vite build --config vite.config.ts",
     "watch": "concurrently \"npm run watch:extension\" \"npm run watch:webview\"",
@@ -75,6 +77,7 @@
     "dev:codebuddy-bypass:status": "node local-dev-bypass/codebuddy-hook-bypass.mjs status",
     "test:codebuddy-bypass": "node --test local-dev-bypass/codebuddy-hook-bypass.test.mjs",
     "package": "vsce package",
+    "package:windows": "node scripts/build-windows-package.mjs",
     "publish": "vsce publish --skip-duplicate --no-dependencies && source .env && ovsx publish -p \"$OPEN_VSX_KEY\" --no-dependencies",
     "publish:pre": "vsce publish --pre-release --no-dependencies && source .env && ovsx publish --pre-release -p \"$OPEN_VSX_KEY\" --no-dependencies",
     "google-login": "gcloud auth application-default login"

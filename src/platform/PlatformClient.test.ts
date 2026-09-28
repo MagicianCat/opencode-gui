@@ -38,6 +38,19 @@ describe("PlatformClient", () => {
     await expect(client.session("session-1")).resolves.toMatchObject({ messages: [{ id: "1", runKey: "run-1" }], latestRun: { runKey: "run-1", status: "RUNNING" }, recommendations: [{ skillKey: "tdd" }] });
     await client.cancelRun("run-1"); expect(fetchMock.mock.calls[3]?.[0]).toBe("http://localhost/api/v1/agent/runs/run-1:cancel");
   });
+  it("keeps each historical recommendation bound to its originating run", async () => {
+    const secrets = new MemorySecrets(); secrets.values.set("yantuAssistant.refreshToken", "refresh");
+    const fetchMock = vi.fn().mockResolvedValueOnce(response({ accessToken: "access" })).mockResolvedValueOnce(response({
+      messages: [
+        { sequenceNo: 1, role: "ASSISTANT", content: "first", runKey: "run-1", recommendation: { items: [{ skillKey: "skill-one" }] } },
+        { sequenceNo: 2, role: "ASSISTANT", content: "second", runKey: "run-2", recommendation: { items: [{ skillKey: "skill-two" }] } },
+      ],
+      latestRun: { runKey: "run-2", status: "SUCCEEDED" },
+      latestRecommendation: { items: [{ skillKey: "skill-two" }] },
+    }));
+    vi.stubGlobal("fetch", fetchMock); const client = new PlatformClient({ apiBaseUrl: () => "http://localhost/api/v1", secrets });
+    await expect(client.session("session-1")).resolves.toMatchObject({ recommendations: [{ skillKey: "skill-one", runKey: "run-1" }, { skillKey: "skill-two", runKey: "run-2" }] });
+  });
   it("builds verification URL only from server user_code and supports cancellation", async () => {
     const secrets = new MemorySecrets(); const fetchMock = vi.fn().mockResolvedValueOnce(response({ deviceCode: "device", userCode: "ABCD-1234", verificationUri: "https://platform.example/ide/authorize?untrusted=drop", expiresIn: 60, pollInterval: 1 })); vi.stubGlobal("fetch", fetchMock);
     const client = new PlatformClient({ apiBaseUrl: () => "https://platform.example/api/v1", secrets }); const login = await client.beginDeviceLogin();

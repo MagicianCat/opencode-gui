@@ -60,7 +60,7 @@ async function status() {
 
 async function discoverTargetHooks() {
   const installed = await readJson(installedPluginsFile);
-  const entries = installed?.plugins?.["yantu-hook-probe@yantu-hook-probe-local"];
+  const entries = installed?.plugins?.["yantu-assistant-telemetry@yantu-internal"];
   const installPath = Array.isArray(entries) ? entries.find(item => item?.scope === "user")?.installPath : undefined;
   return installPath ? path.join(installPath, "hooks", "hooks.json") : "";
 }
@@ -71,7 +71,7 @@ export function addBypassHook(config, script) {
   if (!postToolUse.some(item => item?.["x-yantu-bypass-id"] === bypassId)) {
     postToolUse.push({
       "x-yantu-bypass-id": bypassId,
-      matcher: "Skill",
+      matcher: "Skill|skill|use_skill",
       hooks: [{ type: "command", command: `node "${script}"`, timeout: 5 }]
     });
   }

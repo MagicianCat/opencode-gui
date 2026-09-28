@@ -82,9 +82,9 @@ export class PlatformClient {
     const value = asRecord(await this.request(`/agent/sessions/${encodeURIComponent(sessionKey)}`));
     const messages = readArray(value, "messages").map(normalizeMessage).filter((item): item is NonNullable<ReturnType<typeof normalizeMessage>> => item !== null);
     const latest = asRecord(value.latestRun); const latestRun = typeof latest.runKey === "string" && typeof latest.status === "string" ? { runKey: latest.runKey, status: latest.status } : undefined;
-    const latestRecommendation = asRecord(value.latestRecommendation); const fromLatest = readArray(latestRecommendation, "items");
-    const fromMessages = readArray(value, "messages").flatMap(message => readArray(asRecord(message).recommendation, "items"));
-    return { messages, latestRun, recommendations: fromLatest.length ? fromLatest : fromMessages };
+    const latestRecommendation = asRecord(value.latestRecommendation); const fromLatest = readArray(latestRecommendation, "items").map(item => ({ ...asRecord(item), runKey: latestRun?.runKey }));
+    const fromMessages = readArray(value, "messages").flatMap(message => { const row = asRecord(message); const runKey = typeof row.runKey === "string" ? row.runKey : undefined; return readArray(row.recommendation, "items").map(item => ({ ...asRecord(item), runKey })); });
+    return { messages, latestRun, recommendations: fromMessages.length ? fromMessages : fromLatest };
   }
 
   async createSession(osType: OsType): Promise<Session> {

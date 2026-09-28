@@ -5,7 +5,7 @@
     {
       "name": "yantu-assistant-telemetry",
       "source": "./plugins/yantu-assistant-telemetry",
-      "description": "CodeBuddy Skill usage telemetry for Yantu Assistant",
+      "description": "Yantu Assistant CodeBuddy telemetry integration",
       "version": "1.0.0"
     }
   ]
