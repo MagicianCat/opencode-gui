@@ -2,7 +2,7 @@
   "name": "yantu-assistant",
   "displayName": "研途助手",
   "description": "连接内部研发助手平台的 CodeBuddy IDE 对话扩展",
-  "version": "0.5.1",
+  "version": "0.5.3",
   "publisher": "skill-platform",
   "icon": "media/logo.png",
   "repository": {
@@ -51,6 +51,12 @@
           "scope": "machine",
           "default": "",
           "description": "研发助手平台网页地址；留空时使用当前构建环境配置"
+        },
+        "yantuAssistant.telemetryHookCompatibilityMode": {
+          "type": "boolean",
+          "scope": "machine",
+          "default": false,
+          "description": "启用旧版 CodeBuddy Hook 采样兼容层；通常无需开启"
         }
       }
     }

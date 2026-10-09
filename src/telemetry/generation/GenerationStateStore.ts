@@ -8,7 +8,11 @@ import type { GenerationState } from "./GenerationState";
  * 写采用 tmp + rename 保证原子性；读失败返回 null（损坏状态不阻塞采集）。
  */
 export class GenerationStateStore {
-  readonly directory = path.join(os.homedir(), ".codebuddy", "yantu-assistant", "telemetry", "generations");
+  readonly directory: string;
+
+  constructor(homeDirectory = os.homedir()) {
+    this.directory = path.join(homeDirectory, ".codebuddy", "yantu-assistant", "telemetry", "generations");
+  }
 
   private fileFor(generationId: string): string {
     const safe = generationId.replace(/[^A-Za-z0-9._-]/g, "_");

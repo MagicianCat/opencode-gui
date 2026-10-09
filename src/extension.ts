@@ -7,6 +7,7 @@ import { ensureCodeBuddyHook } from "./telemetry/CodeBuddyHookInstaller";
 import { ensureClientInstallationId } from "./telemetry/ClientInstallationId";
 import { GenerationTelemetry } from "./telemetry/generation/GenerationTelemetry";
 import { buildConfig } from "./BuildConfig";
+import { CodeBuddyLogSkillMonitor } from "./telemetry/CodeBuddyLogSkillMonitor";
 
 let logger: vscode.LogOutputChannel;
 export function getLogger(): vscode.LogOutputChannel { return logger; }
@@ -19,13 +20,17 @@ export function activate(context: vscode.ExtensionContext): void {
     error => logger.error(`clientInstallationId 初始化失败：${error}`));
   const telemetry = new TelemetryUploader(client, { error: error => logger.error(String(error)) });
   telemetry.start(); context.subscriptions.push(telemetry);
+  const logSkillMonitor = new CodeBuddyLogSkillMonitor({ info: message => logger.info(message), error: message => logger.error(message) });
+  logSkillMonitor.start(); context.subscriptions.push(logSkillMonitor);
   const generationTelemetry = new GenerationTelemetry(client, { error: error => logger.error(String(error)) });
   generationTelemetry.start(); context.subscriptions.push(generationTelemetry);
-  void ensureCodeBuddyHook(context.extensionUri, { info: message => logger.info(message), error: message => logger.error(message) }).then(async result => {
-    if (!result.restartRequired) return;
-    const action = await vscode.window.showInformationMessage("研途助手采样组件已安装，需要重启 CodeBuddy 后生效。", "立即重启", "稍后");
-    if (action === "立即重启") await vscode.commands.executeCommand("workbench.action.reloadWindow");
-  }, error => logger.error(`CodeBuddy Hook 自动安装失败：${error instanceof Error ? error.message : String(error)}`));
+  if (vscode.workspace.getConfiguration("yantuAssistant").get<boolean>("telemetryHookCompatibilityMode", false)) {
+    void ensureCodeBuddyHook(context.extensionUri, { info: message => logger.info(message), error: message => logger.error(message) }).then(async result => {
+      if (!result.restartRequired) return;
+      const action = await vscode.window.showInformationMessage("研途助手兼容采样组件已安装，需要重启 CodeBuddy 后生效。", "立即重启", "稍后");
+      if (action === "立即重启") await vscode.commands.executeCommand("workbench.action.reloadWindow");
+    }, error => logger.error(`CodeBuddy Hook 兼容模式安装失败：${error instanceof Error ? error.message : String(error)}`));
+  }
   const provider = new YantuViewProvider(context.extensionUri, client, buildConfig.webBaseUrl);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(YantuViewProvider.viewType, provider), provider);
   logger.info("研途助手已激活");

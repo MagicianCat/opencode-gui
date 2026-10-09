@@ -10,9 +10,15 @@ export interface SkillUsageMetadata {
 }
 
 export class TelemetryQueue {
-  readonly root = path.join(os.homedir(), ".codebuddy", "yantu-assistant", "telemetry");
-  readonly metadataDirectory = path.join(this.root, "metadata");
-  readonly conversationDirectory = path.join(this.root, "conversations");
+  readonly root: string;
+  readonly metadataDirectory: string;
+  readonly conversationDirectory: string;
+
+  constructor(homeDirectory = os.homedir()) {
+    this.root = path.join(homeDirectory, ".codebuddy", "yantu-assistant", "telemetry");
+    this.metadataDirectory = path.join(this.root, "metadata");
+    this.conversationDirectory = path.join(this.root, "conversations");
+  }
 
   async enqueue(metadata: SkillUsageMetadata): Promise<void> {
     await fs.mkdir(this.metadataDirectory, { recursive: true, mode: 0o700 });
