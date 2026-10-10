@@ -6,6 +6,7 @@ import { aggregateFileTypes } from "./GenerationAggregator";
 
 /** 超时阈值：超过该时长无更新且未收到 Stop 的 Generation 以 PARTIAL 上报。 */
 const PARTIAL_TIMEOUT_MS = 20 * 60 * 1000;
+const WRITE_SETTLE_MS = 1_000;
 
 /**
  * Generation 上传器（扩展进程）。周期性扫描本地 Generation 状态：
@@ -40,13 +41,15 @@ export class GenerationTelemetry implements vscode.Disposable {
   }
 
   private async process(state: GenerationState): Promise<void> {
+    // 等待同一批日志解析完毕，避免先上传 onAgentEnd、随后丢掉紧邻的最终 usage。
+    if (Date.now() - state.updatedAtMs < WRITE_SETTLE_MS) return;
     if (state.status === "RUNNING") {
       if (Date.now() - state.updatedAtMs < this.partialTimeoutMs) return; // 仍在进行
       state.status = "PARTIAL"; // 超时未收到 Stop，按 PARTIAL 上报避免滞留
     }
     try {
       await this.client.recordGeneration(toPayload(state));
-      await this.store.remove(state.generationId);
+      await this.store.removeIfUnchanged(state.generationId, state.updatedAtMs);
     } catch (error) {
       this.logger.error(error); // 保留状态，下轮重试
     }

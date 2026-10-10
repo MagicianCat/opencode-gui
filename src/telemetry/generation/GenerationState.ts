@@ -1,4 +1,4 @@
-// Generation 本地状态：hook 脚本（独立 node 进程）按事件增量写入，扩展进程聚合并上报。
+// Generation 本地状态：日志采集器或兼容 hook 按事件增量写入，扩展进程聚合并上报。
 // 一次 User Prompt 对应一个 Generation；状态文件按 generationId 落盘，避免并发互相覆盖。
 
 /** 一次 Skill 调用记录（关联到 Generation）。 */

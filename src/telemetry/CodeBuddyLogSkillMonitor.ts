@@ -7,14 +7,36 @@ import { promisify } from "node:util";
 import type * as vscode from "vscode";
 import { TelemetryQueue, type SkillUsageMetadata } from "./TelemetryQueue";
 import { GenerationStateStore } from "./generation/GenerationStateStore";
-import { emptyGeneration, type GenerationState } from "./generation/GenerationState";
+import { emptyGeneration, type FileDiffMetric, type GenerationState, type GenerationTokenUsage } from "./generation/GenerationState";
 import { ProjectResolver } from "./project/ProjectResolver";
 
 const gzipAsync = promisify(gzip);
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024;
 const MAX_REMEMBERED_CALLS = 2_000;
+const MAX_TURN_ITEMS = 10_000;
+const MAX_CHANGE_FILE_BYTES = 1024 * 1024;
 
-interface LogContext { conversationId?: string; workspace?: string; turnStartedAt?: string; turnInput?: string; generationId?: string; remainder: string; }
+interface StepUsage extends GenerationTokenUsage { step: number; }
+interface PlatformSkillInvocation { skillKey: string; skillVersionId?: number; invokedAt: string; }
+interface TurnRuntime {
+  requestId: string;
+  conversationId: string;
+  generationId: string;
+  startedAt: string;
+  input?: string;
+  workspace?: string;
+  modelSteps: Set<number>;
+  stepUsages: Map<number, StepUsage>;
+  toolCallIds: Set<string>;
+  toolFailureIds: Set<string>;
+  platformSkills: Map<string, PlatformSkillInvocation>;
+  cancelled: boolean;
+  endedAt?: string;
+  status?: GenerationState["status"];
+  exactUsage?: GenerationTokenUsage;
+  fileDiffs?: FileDiffMetric[];
+}
+interface LogContext { conversationId?: string; workspace?: string; currentTurn?: TurnRuntime; remainder: string; }
 interface PersistedState { offsets: Record<string, number>; seenCallIds: string[]; }
 interface PlatformMarker { source: "yantu-platform"; skillKey: string; skillVersionId?: number; installationId?: string; }
 
@@ -25,6 +47,7 @@ export interface LogMonitorOptions {
   logRoots?: string[];
   queue?: TelemetryQueue;
   generationStore?: GenerationStateStore;
+  changesRoot?: string;
   now?: () => Date;
 }
 
@@ -36,6 +59,7 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
   private readonly queue: TelemetryQueue;
   private readonly generationStore: GenerationStateStore;
   private readonly projectResolver: ProjectResolver;
+  private readonly changesRoots: string[];
   private readonly now: () => Date;
   private readonly stateFile: string;
   private readonly diagnosticFile: string;
@@ -63,6 +87,9 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
     this.queue = options.queue ?? new TelemetryQueue(this.home);
     this.generationStore = options.generationStore ?? new GenerationStateStore(this.home);
     this.projectResolver = new ProjectResolver(() => this.clientInstallationId);
+    this.changesRoots = options.changesRoot
+      ? [options.changesRoot]
+      : ["Tkcoding", "CodeBuddy", "codebuddy"].map(name => path.join(appData, name, "User", "globalStorage", "tencent-cloud.coding-copilot", "file-changes"));
     this.now = options.now ?? (() => new Date());
     const telemetryRoot = path.join(this.home, ".codebuddy", "yantu-assistant", "telemetry");
     this.stateFile = path.join(telemetryRoot, "codebuddy-log-monitor-state.json");
@@ -132,57 +159,133 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
     if (match) {
       context.conversationId = match[1];
       context.workspace = match[2]?.trim();
+      if (context.currentTurn?.conversationId === match[1]) context.currentTurn.workspace = context.workspace;
       return;
     }
-    match = line.match(/\[AgentReporter\] onAgentStart:\s*userInput=(.*?)\s+agent=\S+\s+mode=\S+\s+conversationId=([^\s]+)/);
+    match = line.match(/\[AgentReporter\] onAgentStart:\s*userInput=(.*?)\s+agent=\S+\s+mode=\S+\s+conversationId=(\S+)(?:\s+requestId=(\S+))?/);
     if (match) {
-      const previousGenerationId = context.generationId;
-      const endedAt = this.logTimestamp(line);
-      if (previousGenerationId) this.schedule(() => this.completeGeneration(previousGenerationId, endedAt));
-      context.turnStartedAt = endedAt;
-      context.turnInput = match[1];
+      const startedAt = this.logTimestamp(line);
+      const previous = context.currentTurn;
+      if (previous && !previous.endedAt) {
+        previous.endedAt = startedAt;
+        previous.status = "COMPLETED";
+        this.schedule(() => this.finalizeRuntime(previous));
+      }
       context.conversationId = match[2];
-      context.generationId = this.generationId(context.conversationId, context.turnStartedAt);
+      const requestId = match[3] || createHash("sha256").update(`${match[2]}\n${startedAt}`).digest("hex");
+      context.currentTurn = {
+        requestId,
+        conversationId: match[2]!,
+        generationId: this.generationId(requestId),
+        startedAt,
+        input: match[1],
+        workspace: context.workspace,
+        modelSteps: new Set(),
+        stepUsages: new Map(),
+        toolCallIds: new Set(),
+        toolFailureIds: new Set(),
+        platformSkills: new Map(),
+        cancelled: false,
+      };
       return;
     }
     match = line.match(/tool-call-streaming-start\s+开始解析:\s*(\S+)\s+-\s+(\S+)/);
-    if (match) { this.toolNames.set(match[1]!, match[2]!); return; }
+    if (match) {
+      const [callId, toolName] = [match[1]!, match[2]!];
+      this.toolNames.set(callId, toolName);
+      if (context.currentTurn && context.currentTurn.toolCallIds.size < MAX_TURN_ITEMS && !context.currentTurn.toolCallIds.has(callId)) {
+        const turn = context.currentTurn;
+        turn.toolCallIds.add(callId);
+        this.schedule(() => this.persistRuntime(turn));
+      }
+      return;
+    }
     match = line.match(/onParameterStartParsing:\s*(\S+),\s*(\S+)/);
     if (match) { this.toolNames.set(match[1]!, match[2]!); return; }
+
+    match = line.match(/notifyStepStart,\s*step:\s*(\d+),\s*requestId:\s*([^,\s]+)/);
+    if (match && context.currentTurn?.requestId === match[2]) {
+      const turn = context.currentTurn;
+      if (turn.modelSteps.size < MAX_TURN_ITEMS) turn.modelSteps.add(Number(match[1]));
+      this.schedule(() => this.persistRuntime(turn));
+      return;
+    }
+    match = line.match(/notifyStepEnd,\s*step:\s*(\d+),\s*requestId:\s*([^,\s]+).*?usage:\s*(\{.*\})(?:,\s*isMaxTokenLimit|$)/);
+    if (match && context.currentTurn?.requestId === match[2]) {
+      const turn = context.currentTurn;
+      const usage = this.parseUsage(match[3], "PARTIAL", turn.modelSteps.size);
+      if (usage && turn.stepUsages.size < MAX_TURN_ITEMS) turn.stepUsages.set(Number(match[1]), { ...usage, step: Number(match[1]) });
+      this.schedule(() => this.persistRuntime(turn));
+      return;
+    }
+
+    match = line.match(/\[Tool:[^\]]+\]\s+\[(\S+)\].*\[fullExecute\]\s+error(?:,|\s|$)/i);
+    if (match && context.currentTurn) {
+      const turn = context.currentTurn;
+      if (turn.toolCallIds.size < MAX_TURN_ITEMS) turn.toolCallIds.add(match[1]!);
+      if (turn.toolFailureIds.size < MAX_TURN_ITEMS) turn.toolFailureIds.add(match[1]!);
+      this.schedule(() => this.persistRuntime(turn));
+      return;
+    }
+    if (/notifyAgentCancel|Agent canceled by error|cancelled by abort|AgentState\.cancelled/i.test(line)) {
+      if (context.currentTurn) context.currentTurn.cancelled = true;
+      return;
+    }
+
+    match = line.match(/\[AgentReporter\]\s+onAgentEnd:.*conversationId=(\S+)\s+requestId=(\S+)\s+error=(true|false)/);
+    if (match && context.currentTurn?.requestId === match[2]) {
+      const turn = context.currentTurn;
+      turn.endedAt = this.logTimestamp(line);
+      turn.status = match[3] === "false" ? "COMPLETED" : turn.cancelled ? "CANCELLED" : "FAILED";
+      this.schedule(() => this.finalizeRuntime(turn));
+      return;
+    }
+    match = line.match(/Agent execution successful with usage:\s*(\{.*\})/);
+    if (match && context.currentTurn) {
+      const turn = context.currentTurn;
+      const usage = this.parseUsage(match[1], "EXACT", turn.modelSteps.size);
+      if (usage) turn.exactUsage = usage;
+      this.schedule(() => this.persistRuntime(turn));
+      return;
+    }
+
     match = line.match(/参数解析完成:\s*(\S+)\s+-\s*参数:\s*command\s+-\s*值:\s*(\S+)/);
     if (!match || this.toolNames.get(match[1]!) !== "use_skill") return;
     const [callId, skillKey] = [match[1]!, match[2]!];
     if (this.seen.has(callId) || this.inFlight.has(callId)) return;
     this.inFlight.add(callId);
-    this.schedule(() => this.capture(file, line, callId, skillKey, { ...context }), callId);
+    this.schedule(() => this.capture(file, line, callId, skillKey, context.currentTurn, context.workspace), callId);
   }
 
-  private async capture(file: string, line: string, callId: string, skillKey: string, context: LogContext): Promise<void> {
+  private async capture(file: string, line: string, callId: string, skillKey: string,
+      runtime: TurnRuntime | undefined, workspace?: string): Promise<void> {
     try {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(skillKey)) return;
-      const resolved = await this.resolveMarker(skillKey, context.workspace);
+      const resolved = await this.resolveMarker(skillKey, workspace);
       if (!resolved) {
-        await this.diagnostic("skip.non-platform-skill", { callId, skillKey, workspace: context.workspace, sourceLog: file });
+        await this.diagnostic("skip.non-platform-skill", { callId, skillKey, workspace, sourceLog: file });
         return;
       }
       const eventId = randomUUID();
       const invokedAt = this.logTimestamp(line);
-      const generationId = context.generationId ?? this.generationId(context.conversationId || "UNKNOWN", context.turnStartedAt || invokedAt);
-      const conversationFile = context.turnInput ? await this.writeBestEffortConversation(eventId, context, invokedAt) : undefined;
+      const turn = runtime ?? this.syntheticRuntime(invokedAt, workspace);
+      if (turn.toolCallIds.size < MAX_TURN_ITEMS) turn.toolCallIds.add(callId);
+      const conversationFile = turn.input ? await this.writeBestEffortConversation(eventId, turn, invokedAt) : undefined;
       const metadata: SkillUsageMetadata = {
         eventId,
         skillKey,
         skillVersionId: this.number(resolved.marker.skillVersionId),
         installationId: this.string(resolved.marker.installationId),
         invokedAt,
-        localDirectory: this.normalizeWorkspace(context.workspace) || "UNKNOWN",
-        clientSessionId: context.conversationId || "UNKNOWN",
-        generationId,
+        localDirectory: this.normalizeWorkspace(workspace) || "UNKNOWN",
+        clientSessionId: turn.conversationId,
+        generationId: turn.generationId,
         client: "CodeBuddyIDE",
         conversationFile,
       };
       await this.queue.enqueue(metadata);
-      await this.updateGeneration(generationId, context, skillKey, this.number(resolved.marker.skillVersionId), invokedAt);
+      turn.platformSkills.set(skillKey, { skillKey, skillVersionId: this.number(resolved.marker.skillVersionId), invokedAt });
+      await this.persistRuntime(turn);
       // Persist deduplication only after the required event is safely queued.
       this.remember(callId);
       await this.diagnostic("captured", { eventId, callId, skillKey, scope: resolved.scope, localDirectory: metadata.localDirectory });
@@ -201,14 +304,13 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
     this.captureTasks.add(task);
   }
 
-  private async updateGeneration(generationId: string, context: LogContext, skillKey: string,
-      skillVersionId: number | undefined, invokedAt: string): Promise<void> {
-    let state = this.generations.get(generationId) ?? await this.generationStore.load(generationId);
+  private async persistRuntime(runtime: TurnRuntime): Promise<void> {
+    if (runtime.platformSkills.size === 0) return;
+    let state = this.generations.get(runtime.generationId) ?? await this.generationStore.load(runtime.generationId);
     if (!state) {
-      state = emptyGeneration(generationId, context.conversationId || "UNKNOWN", context.turnStartedAt || invokedAt);
-      state.status = "PARTIAL";
+      state = emptyGeneration(runtime.generationId, runtime.conversationId, runtime.startedAt);
       state.clientInstallationId = this.clientInstallationId;
-      state.cwd = this.normalizeWorkspace(context.workspace) || undefined;
+      state.cwd = this.normalizeWorkspace(runtime.workspace) || undefined;
       if (state.cwd && state.cwd !== path.parse(state.cwd).root) {
         const project = await this.projectResolver.resolve(state.cwd);
         state.projectKey = project.projectKey;
@@ -216,27 +318,131 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
         state.projectSource = project.projectSource;
       }
     }
-    if (!state.skillInvocations.some(item => item.skillKey === skillKey)) {
-      state.skillInvocations.push({ skillKey, skillVersionId, invokedAt });
+    state.skillInvocations = [...runtime.platformSkills.values()];
+    state.toolCallCount = runtime.toolCallIds.size;
+    state.toolFailureCount = runtime.toolFailureIds.size;
+    state.usage = runtime.exactUsage ?? this.aggregatePartialUsage(runtime);
+    state.status = runtime.status ?? "RUNNING";
+    state.endedAt = runtime.endedAt;
+    state.durationMs = runtime.endedAt ? Math.max(0, Date.parse(runtime.endedAt) - Date.parse(runtime.startedAt)) : undefined;
+    if (runtime.fileDiffs) state.fileDiffs = runtime.fileDiffs;
+    this.generations.set(runtime.generationId, state);
+    await this.generationStore.save(state);
+  }
+
+  private async finalizeRuntime(runtime: TurnRuntime): Promise<void> {
+    if (runtime.platformSkills.size === 0) return;
+    runtime.fileDiffs = await this.collectFileChanges(runtime);
+    await this.persistRuntime(runtime);
+  }
+
+  private generationId(requestId: string): string {
+    return `log-${requestId}`;
+  }
+
+  private syntheticRuntime(invokedAt: string, workspace?: string): TurnRuntime {
+    const requestId = createHash("sha256").update(`UNKNOWN\n${invokedAt}`).digest("hex");
+    return {
+      requestId, conversationId: "UNKNOWN", generationId: this.generationId(requestId), startedAt: invokedAt, workspace,
+      modelSteps: new Set(), stepUsages: new Map(), toolCallIds: new Set(), toolFailureIds: new Set(),
+      platformSkills: new Map(), cancelled: false,
+    };
+  }
+
+  private parseUsage(raw: string | undefined, quality: "EXACT" | "PARTIAL", modelCallCount: number): GenerationTokenUsage | undefined {
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as Record<string, unknown>;
+      return {
+        inputTokens: this.number(value.inputTokens),
+        outputTokens: this.number(value.outputTokens),
+        totalTokens: this.number(value.totalTokens),
+        cacheReadTokens: this.number(value.cacheTokens),
+        cacheWriteTokens: this.number(value.cachedWriteTokens),
+        cacheMissTokens: this.number(value.cachedMissTokens),
+        thinkingTokens: this.number(value.thinkingTokens),
+        lastTokens: this.number(value.lastTokens),
+        modelCallCount,
+        source: "CODEBUDDY_UPSTREAM_USAGE",
+        quality,
+      };
+    } catch { return undefined; }
+  }
+
+  private aggregatePartialUsage(runtime: TurnRuntime): GenerationTokenUsage | undefined {
+    const usages = [...runtime.stepUsages.values()];
+    if (usages.length === 0 && runtime.modelSteps.size === 0) return undefined;
+    const sum = (field: keyof GenerationTokenUsage): number => usages.reduce((total, usage) => {
+      const value = usage[field];
+      return total + (typeof value === "number" ? value : 0);
+    }, 0);
+    const last = usages.sort((a, b) => a.step - b.step).at(-1);
+    return {
+      inputTokens: sum("inputTokens"), outputTokens: sum("outputTokens"), totalTokens: sum("totalTokens"),
+      cacheReadTokens: sum("cacheReadTokens"), cacheWriteTokens: sum("cacheWriteTokens"),
+      cacheMissTokens: sum("cacheMissTokens"), thinkingTokens: sum("thinkingTokens"),
+      modelCallCount: runtime.modelSteps.size, lastTokens: last?.lastTokens,
+      source: "CODEBUDDY_UPSTREAM_USAGE", quality: "PARTIAL",
+    };
+  }
+
+  private async collectFileChanges(runtime: TurnRuntime): Promise<FileDiffMetric[]> {
+    if (!runtime.endedAt || !/^[A-Za-z0-9_-]{1,256}$/.test(runtime.conversationId)) return [];
+    const startedAt = Date.parse(runtime.startedAt);
+    const endedAt = Date.parse(runtime.endedAt);
+    const byFile = new Map<string, FileDiffMetric>();
+    for (const root of this.changesRoots) {
+      const directory = path.join(root, runtime.conversationId);
+      let names: string[];
+      try { names = (await fs.readdir(directory)).slice(0, MAX_TURN_ITEMS); } catch { continue; }
+      for (const name of names) {
+        if (!name.endsWith(".json")) continue;
+        const value = await this.readSmallJson(path.join(directory, name));
+        if (!value) continue;
+        const timestamp = this.changeTimestamp(value.timestamp);
+        if (timestamp === undefined || timestamp < startedAt || timestamp > endedAt) continue;
+        const filePath = this.string(value.filePath) ?? this.string(value.fileName);
+        if (!filePath || filePath.length > 4096) continue;
+        const existing = byFile.get(filePath) ?? this.emptyFileMetric(filePath);
+        existing.linesAdded += this.nonNegative(value.addedLines);
+        existing.linesDeleted += this.nonNegative(value.removedLines);
+        const changeType = String(value.changeType ?? "").toLowerCase();
+        existing.created ||= /create|add|new/.test(changeType);
+        existing.modified ||= !existing.created || /modify|edit|update/.test(changeType);
+        byFile.set(filePath, existing);
+      }
     }
-    state.toolCallCount += 1;
-    state.status = "PARTIAL";
-    this.generations.set(generationId, state);
-    await this.generationStore.save(state);
+    return [...byFile.values()];
   }
 
-  private async completeGeneration(generationId: string, endedAt: string): Promise<void> {
-    const state = this.generations.get(generationId) ?? await this.generationStore.load(generationId);
-    if (!state || state.skillInvocations.length === 0) return;
-    state.status = "COMPLETED";
-    state.endedAt = endedAt;
-    state.durationMs = Math.max(0, Date.parse(endedAt) - Date.parse(state.startedAt));
-    this.generations.set(generationId, state);
-    await this.generationStore.save(state);
+  private emptyFileMetric(filePath: string): FileDiffMetric {
+    const extension = path.extname(filePath).replace(/^\./, "").toLowerCase();
+    const categories: Record<string, string> = {
+      java: "JAVA", kt: "KOTLIN", kts: "KOTLIN", js: "JAVASCRIPT", jsx: "JAVASCRIPT", mjs: "JAVASCRIPT",
+      ts: "TYPESCRIPT", tsx: "TYPESCRIPT", vue: "VUE", html: "HTML", css: "CSS", scss: "CSS", less: "CSS",
+      sql: "SQL", xml: "XML", yaml: "YAML", yml: "YAML", json: "JSON", py: "PYTHON", go: "GO",
+      sh: "SHELL", bash: "SHELL", md: "MARKDOWN", properties: "CONFIG", ini: "CONFIG", toml: "CONFIG",
+    };
+    return { filePath, extension, category: categories[extension] ?? "OTHER", linesAdded: 0, linesDeleted: 0, created: false, modified: false };
   }
 
-  private generationId(conversationId: string, startedAt: string): string {
-    return `log-${createHash("sha256").update(`${conversationId}\n${startedAt}`).digest("hex")}`;
+  private changeTimestamp(value: unknown): number | undefined {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value !== "string") return undefined;
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+
+  private nonNegative(value: unknown): number {
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+  }
+
+  private async readSmallJson(file: string): Promise<Record<string, unknown> | undefined> {
+    try {
+      if ((await fs.stat(file)).size > MAX_CHANGE_FILE_BYTES) return undefined;
+      const value = JSON.parse(await fs.readFile(file, "utf8"));
+      return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+    } catch { return undefined; }
   }
 
   private async resolveMarker(skillKey: string, workspace?: string): Promise<{ marker: PlatformMarker; scope: "project" | "global" } | undefined> {
@@ -253,17 +459,17 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
     return undefined;
   }
 
-  private async writeBestEffortConversation(eventId: string, context: LogContext, capturedAt: string): Promise<string | undefined> {
+  private async writeBestEffortConversation(eventId: string, runtime: TurnRuntime, capturedAt: string): Promise<string | undefined> {
     try {
       const directory = this.queue.conversationDirectory;
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
       const target = path.join(directory, `${eventId}.json.gz`);
       const body = {
         schemaVersion: 1,
-        clientSessionId: context.conversationId || "UNKNOWN",
+        clientSessionId: runtime.conversationId,
         capturedAt,
         partial: true,
-        messages: [{ role: "user", content: context.turnInput, createdAt: context.turnStartedAt }],
+        messages: [{ role: "user", content: runtime.input, createdAt: runtime.startedAt }],
       };
       await fs.writeFile(target, await gzipAsync(Buffer.from(JSON.stringify(body))), { flag: "wx", mode: 0o600 });
       return target;

@@ -78,7 +78,7 @@ describe("CodeBuddyLogSkillMonitor", () => {
     expect(await queue.pendingMetadata()).toHaveLength(1);
   });
 
-  it("creates one stable partial Generation for multiple platform Skills in the same turn", async () => {
+  it("keeps one stable running Generation for multiple platform Skills until the turn ends", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "yantu-log-monitor-")); temporary.push(root);
     const home = path.join(root, "home");
     const logs = path.join(root, "logs");
@@ -109,7 +109,7 @@ describe("CodeBuddyLogSkillMonitor", () => {
     const generationFiles = await fs.readdir(generationDirectory);
     expect(generationFiles).toHaveLength(1);
     const generation = JSON.parse(await fs.readFile(path.join(generationDirectory, generationFiles[0]!), "utf8"));
-    expect(generation).toMatchObject({ sessionId: "session-1", status: "PARTIAL", projectName: "project" });
+    expect(generation).toMatchObject({ sessionId: "session-1", status: "RUNNING", projectName: "project" });
     expect(generation.skillInvocations.map((item: { skillKey: string }) => item.skillKey)).toEqual(["code-review", "security-review"]);
   });
 
@@ -132,7 +132,72 @@ describe("CodeBuddyLogSkillMonitor", () => {
     expect(generation.status).toBe("COMPLETED");
     expect(generation.durationMs).toBe(60_000);
   });
+
+  it("collects exact usage, model calls, all tool calls, failures and file changes for a completed sampled turn", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "yantu-log-monitor-")); temporary.push(root);
+    const home = path.join(root, "home");
+    const logs = path.join(root, "logs");
+    const changes = path.join(root, "file-changes");
+    const project = path.join(root, "project");
+    const log = await createLog(logs, "window1");
+    await writeMarker(path.join(home, ".codebuddy", "skills", "code-review"), "code-review", 283);
+    await fs.mkdir(path.join(changes, "session-metrics"), { recursive: true });
+    await fs.writeFile(path.join(changes, "session-metrics", "change.json"), JSON.stringify({
+      timestamp: new Date("2026-10-08T09:16:24.000Z").getTime(),
+      addedLines: 12, removedLines: 3, filePath: path.join(project, "src", "A.java"), changeType: "modified",
+    }));
+    const monitor = new CodeBuddyLogSkillMonitor(console, {
+      homeDirectory: home, logRoots: [logs], queue: new TelemetryQueue(home), changesRoot: changes,
+    });
+    await monitor.poll();
+    await fs.appendFile(log, completedMetricsInvocation(project));
+    await monitor.poll();
+
+    const generation = await onlyGeneration(home);
+    expect(generation.status).toBe("COMPLETED");
+    expect(generation.durationMs).toBe(10_000);
+    expect(generation.toolCallCount).toBe(2);
+    expect(generation.toolFailureCount).toBe(1);
+    expect(generation.usage).toEqual(expect.objectContaining({
+      inputTokens: 300, outputTokens: 20, totalTokens: 320,
+      cacheReadTokens: 250, cacheWriteTokens: 2, cacheMissTokens: 50,
+      thinkingTokens: 7, lastTokens: 170, modelCallCount: 2,
+      source: "CODEBUDDY_UPSTREAM_USAGE", quality: "EXACT",
+    }));
+    expect(generation.fileDiffs).toEqual([expect.objectContaining({
+      extension: "java", category: "JAVA", linesAdded: 12, linesDeleted: 3, modified: true,
+    })]);
+  });
+
+  it("marks an aborted sampled turn as cancelled and preserves partial usage", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "yantu-log-monitor-")); temporary.push(root);
+    const home = path.join(root, "home");
+    const logs = path.join(root, "logs");
+    const log = await createLog(logs, "window1");
+    await writeMarker(path.join(home, ".codebuddy", "skills", "code-review"), "code-review", 283);
+    const monitor = new CodeBuddyLogSkillMonitor(console, {
+      homeDirectory: home, logRoots: [logs], queue: new TelemetryQueue(home), changesRoot: path.join(root, "changes"),
+    });
+    await monitor.poll();
+    await fs.appendFile(log, cancelledInvocation(root));
+    await monitor.poll();
+
+    const generation = await onlyGeneration(home);
+    expect(generation.status).toBe("CANCELLED");
+    expect(generation.durationMs).toBe(9_000);
+    expect(generation.usage).toEqual(expect.objectContaining({
+      inputTokens: 150, outputTokens: 5, totalTokens: 155,
+      modelCallCount: 2, quality: "PARTIAL",
+    }));
+  });
 });
+
+async function onlyGeneration(home: string): Promise<any> {
+  const directory = path.join(home, ".codebuddy", "yantu-assistant", "telemetry", "generations");
+  const files = await fs.readdir(directory);
+  expect(files).toHaveLength(1);
+  return JSON.parse(await fs.readFile(path.join(directory, files[0]!), "utf8"));
+}
 
 async function createLog(root: string, windowName: string): Promise<string> {
   const directory = path.join(root, "20261008T161900", windowName, "exthost", "tencent-cloud.coding-copilot");
@@ -155,6 +220,40 @@ function invocation(session: string, workspace: string, input: string, callId: s
     `2026-10-08 17:16:20 [AgentReporter] onAgentStart: userInput=${input} agent=x mode=x conversationId=${session}`,
     `2026-10-08 17:16:21 [StreamParser] tool-call-streaming-start 开始解析: ${callId} - use_skill`,
     `2026-10-08 17:16:22 [StreamParser] 参数解析完成: ${callId} - 参数: command - 值: ${skill}`,
+    "",
+  ].join("\n");
+}
+
+function completedMetricsInvocation(workspace: string): string {
+  return [
+    `2026-10-08 17:16:20.000 [CheckpointCoordinator] initialize START: conversationId=session-metrics, workspace=${workspace}`,
+    "2026-10-08 17:16:20.000 [AgentReporter] onAgentStart: userInput=review agent=craft mode=craft conversationId=session-metrics requestId=request-metrics",
+    "2026-10-08 17:16:20.100 [BaseAgent:craft] [request-metrics] notifyStepStart, step: 1, requestId: request-metrics, messageId: m1",
+    "2026-10-08 17:16:21.000 [StreamParser] tool-call-streaming-start 开始解析: skill-call - use_skill",
+    "2026-10-08 17:16:21.100 [StreamParser] 参数解析完成: skill-call - 参数: command - 值: code-review",
+    "2026-10-08 17:16:22.000 [StreamParser] tool-call-streaming-start 开始解析: failed-call - read_file",
+    "2026-10-08 17:16:22.100 [StreamParser] tool-call-streaming-start 开始解析: failed-call - read_file",
+    "2026-10-08 17:16:22.200 [error] [Tool:read_file] [failed-call] [read-file] [fullExecute] error, errorCode: 1001",
+    "2026-10-08 17:16:23.000 [BaseAgent:craft] [request-metrics] notifyStepEnd, step: 1, requestId: request-metrics, messageId: m1, usage: {\"inputTokens\":140,\"outputTokens\":10,\"totalTokens\":150,\"cacheTokens\":120,\"cachedWriteTokens\":1,\"cachedMissTokens\":20,\"lastTokens\":150,\"thinkingTokens\":3}",
+    "2026-10-08 17:16:23.100 [BaseAgent:craft] [request-metrics] notifyStepStart, step: 2, requestId: request-metrics, messageId: m2",
+    "2026-10-08 17:16:29.900 [BaseAgent:craft] [request-metrics] notifyStepEnd, step: 2, requestId: request-metrics, messageId: m2, usage: {\"inputTokens\":160,\"outputTokens\":10,\"totalTokens\":170,\"cacheTokens\":130,\"cachedWriteTokens\":1,\"cachedMissTokens\":30,\"lastTokens\":170,\"thinkingTokens\":4}",
+    "2026-10-08 17:16:30.000 [AgentReporter] onAgentEnd: agent=craft mode=craft conversationId=session-metrics requestId=request-metrics error=false",
+    "2026-10-08 17:16:30.000 [AgentReporter] Agent execution successful with usage: {\"inputTokens\":300,\"outputTokens\":20,\"totalTokens\":320,\"cacheTokens\":250,\"cachedWriteTokens\":2,\"cachedMissTokens\":50,\"lastTokens\":170,\"thinkingTokens\":7}",
+    "",
+  ].join("\n");
+}
+
+function cancelledInvocation(workspace: string): string {
+  return [
+    `2026-10-08 17:16:20.000 [CheckpointCoordinator] initialize START: conversationId=session-cancel, workspace=${workspace}`,
+    "2026-10-08 17:16:20.000 [AgentReporter] onAgentStart: userInput=review agent=craft mode=craft conversationId=session-cancel requestId=request-cancel",
+    "2026-10-08 17:16:20.100 [BaseAgent:craft] [request-cancel] notifyStepStart, step: 1, requestId: request-cancel, messageId: m1",
+    "2026-10-08 17:16:21.000 [StreamParser] tool-call-streaming-start 开始解析: skill-call - use_skill",
+    "2026-10-08 17:16:21.100 [StreamParser] 参数解析完成: skill-call - 参数: command - 值: code-review",
+    "2026-10-08 17:16:24.000 [BaseAgent:craft] [request-cancel] notifyStepEnd, step: 1, requestId: request-cancel, messageId: m1, usage: {\"inputTokens\":150,\"outputTokens\":5,\"totalTokens\":155,\"cacheTokens\":120,\"cachedWriteTokens\":0,\"cachedMissTokens\":30,\"lastTokens\":155,\"thinkingTokens\":2}",
+    "2026-10-08 17:16:24.100 [BaseAgent:craft] [request-cancel] notifyStepStart, step: 2, requestId: request-cancel, messageId: m2",
+    "2026-10-08 17:16:28.900 [BaseAgent:craft] [request-cancel] notifyAgentCancel, error: This operation was aborted",
+    "2026-10-08 17:16:29.000 [AgentReporter] onAgentEnd: agent=craft mode=craft conversationId=session-cancel requestId=request-cancel error=true",
     "",
   ].join("\n");
 }

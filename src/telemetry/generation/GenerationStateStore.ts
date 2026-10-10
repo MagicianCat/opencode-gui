@@ -29,7 +29,7 @@ export class GenerationStateStore {
 
   async save(state: GenerationState): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
-    state.updatedAtMs = Date.now();
+    state.updatedAtMs = Math.max(Date.now(), (state.updatedAtMs || 0) + 1);
     const target = this.fileFor(state.generationId);
     const temporary = `${target}.tmp`;
     await fs.writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
@@ -47,6 +47,16 @@ export class GenerationStateStore {
 
   async remove(generationId: string): Promise<void> {
     try { await fs.unlink(this.fileFor(generationId)); } catch { /* already gone */ }
+  }
+
+  /** 上传旧快照后仅删除未被更新的同版本状态，避免覆盖期间丢失最终指标。 */
+  async removeIfUnchanged(generationId: string, expectedUpdatedAtMs: number): Promise<boolean> {
+    const current = await this.load(generationId);
+    if (!current || current.updatedAtMs !== expectedUpdatedAtMs) return false;
+    try {
+      await fs.unlink(this.fileFor(generationId));
+      return true;
+    } catch { return false; }
   }
 
   /** 列出全部状态文件（含已结束待上报与超时待 PARTIAL 的）。 */
