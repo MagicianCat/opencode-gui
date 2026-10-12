@@ -1,0 +1,12 @@
+{
+  "name": "yantu-internal",
+  "owner": { "name": "Yantu Assistant" },
+  "plugins": [
+    {
+      "name": "yantu-assistant-telemetry",
+      "source": "./plugins/yantu-assistant-telemetry",
+      "description": "Yantu Assistant CodeBuddy telemetry integration",
+      "version": "1.0.0"
+    }
+  ]
+}
