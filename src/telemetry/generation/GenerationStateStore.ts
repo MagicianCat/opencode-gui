@@ -29,9 +29,13 @@ export class GenerationStateStore {
 
   async save(state: GenerationState): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const existing = await this.load(state.generationId);
+    if (state.uploadedRevision === undefined && existing?.uploadedRevision !== undefined)
+      state.uploadedRevision = existing.uploadedRevision;
     state.updatedAtMs = Math.max(Date.now(), (state.updatedAtMs || 0) + 1);
+    state.revision = Math.max(state.revision ?? 0, existing?.revision ?? 0) + 1;
     const target = this.fileFor(state.generationId);
-    const temporary = `${target}.tmp`;
+    const temporary = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
     await fs.writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
     await fs.rename(temporary, target);
   }
@@ -57,6 +61,18 @@ export class GenerationStateStore {
       await fs.unlink(this.fileFor(generationId));
       return true;
     } catch { return false; }
+  }
+
+  /** Keep the last uploaded revision so late structured evidence can upgrade the same record. */
+  async markUploaded(generationId: string, revision: number, status?: GenerationState["status"]): Promise<void> {
+    const current = await this.load(generationId);
+    if (!current || (current.revision ?? 0) !== revision) return;
+    current.uploadedRevision = revision;
+    if (status === "PARTIAL") current.status = "PARTIAL";
+    const target = this.fileFor(generationId);
+    const temporary = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    await fs.writeFile(temporary, JSON.stringify(current), { mode: 0o600 });
+    await fs.rename(temporary, target);
   }
 
   /** 列出全部状态文件（含已结束待上报与超时待 PARTIAL 的）。 */

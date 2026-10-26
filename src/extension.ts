@@ -20,7 +20,10 @@ export function activate(context: vscode.ExtensionContext): void {
     error => logger.error(`clientInstallationId 初始化失败：${error}`));
   const telemetry = new TelemetryUploader(client, { error: error => logger.error(String(error)) });
   telemetry.start(); context.subscriptions.push(telemetry);
-  const logSkillMonitor = new CodeBuddyLogSkillMonitor({ info: message => logger.info(message), error: message => logger.error(message) });
+  const logSkillMonitor = new CodeBuddyLogSkillMonitor({ info: message => logger.info(message), error: message => logger.error(message) }, {
+    activeWorkspaceDirectory: vscode.workspace.workspaceFolders?.length === 1 ? vscode.workspace.workspaceFolders[0]?.uri.fsPath : undefined,
+    structuredEnabled: vscode.workspace.getConfiguration("yantuAssistant").get<boolean>("structuredTelemetryEnabled", true),
+  });
   logSkillMonitor.start(); context.subscriptions.push(logSkillMonitor);
   const generationTelemetry = new GenerationTelemetry(client, { error: error => logger.error(String(error)) });
   generationTelemetry.start(); context.subscriptions.push(generationTelemetry);

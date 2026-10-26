@@ -9,6 +9,24 @@ const temporary: string[] = [];
 afterEach(async () => Promise.all(temporary.splice(0).map(item => fs.rm(item, { recursive: true, force: true }))));
 
 describe("GenerationStateStore", () => {
+  it("keeps an uploaded revision and leaves later structured updates pending", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "generation-store-")); temporary.push(home);
+    const store = new GenerationStateStore(home);
+    const state = emptyGeneration("log-request-1", "session-1", "2026-10-26T01:00:00Z");
+    state.status = "COMPLETED";
+    state.captureQuality = "LOG_FINAL";
+    await store.save(state);
+    const firstRevision = state.revision!;
+    await store.markUploaded(state.generationId, firstRevision);
+    expect(await store.load(state.generationId)).toMatchObject({ uploadedRevision: firstRevision, captureQuality: "LOG_FINAL" });
+
+    state.captureQuality = "STRUCTURED";
+    state.usage = { inputTokens: 208006, outputTokens: 5789, totalTokens: 213795, quality: "EXACT" };
+    await store.save(state);
+    expect(await store.load(state.generationId)).toMatchObject({ revision: firstRevision + 1,
+      uploadedRevision: firstRevision, captureQuality: "STRUCTURED" });
+  });
+
   it("does not remove a state that was updated while an older snapshot was uploading", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "generation-store-")); temporary.push(home);
     const store = new GenerationStateStore(home);

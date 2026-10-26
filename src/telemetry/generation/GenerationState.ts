@@ -6,6 +6,7 @@ export interface SkillInvocation {
   skillKey: string;
   skillVersionId?: number;
   invokedAt: string;
+  toolCallId?: string;
 }
 
 /** 单个文件的代码量 diff 统计。 */
@@ -44,6 +45,7 @@ export interface GenerationState {
   startedAt: string;
   endedAt?: string;
   durationMs?: number;
+  durationSource?: "LOG_END" | "MESSAGE_ESTIMATED";
   status: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" | "PARTIAL";
 
   // 项目维度（ProjectResolver 在首个事件时解析一次）。
@@ -58,6 +60,16 @@ export interface GenerationState {
   toolFailureCount: number;
 
   usage?: GenerationTokenUsage;
+  modelId?: string;
+  modelName?: string;
+  captureQuality?: "LOG_PARTIAL" | "LOG_FINAL" | "STRUCTURED";
+  codeSource?: "ROAMING_FILE_CHANGES_TIME_WINDOW" | "FILE_TREE_REQUEST_DIFF";
+  structuredComplete?: boolean;
+  sourcesSeen?: Array<"LOG_EXTHOST" | "STRUCTURED">;
+  tokenMismatch?: boolean;
+  ingestLagMs?: number;
+  revision?: number;
+  uploadedRevision?: number;
 
   /** 最近一次状态更新时间（epoch ms），用于 PARTIAL 兜底判断。 */
   updatedAtMs: number;
@@ -67,6 +79,7 @@ export function emptyGeneration(generationId: string, sessionId: string, started
   return {
     generationId, sessionId, startedAt, status: "RUNNING",
     skillInvocations: [], fileDiffs: [], toolCallCount: 0, toolFailureCount: 0,
+    revision: 0,
     updatedAtMs: Date.now(),
   };
 }

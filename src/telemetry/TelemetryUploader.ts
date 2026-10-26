@@ -28,7 +28,9 @@ export class TelemetryUploader implements vscode.Disposable {
   }
 
   private async uploadConversation(file: string): Promise<void> {
-    const eventId = path.basename(file, ".json.gz");
+    const baseName = path.basename(file, ".json.gz");
+    const eventId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(baseName)
+      ? baseName.slice(0, 36) : baseName;
     try { await this.client.uploadSkillUsageConversation(eventId, await fs.readFile(file)); await this.queue.remove(file); } catch { /* conversation is best effort */ }
   }
 }

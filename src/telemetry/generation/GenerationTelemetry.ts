@@ -7,6 +7,7 @@ import { aggregateFileTypes } from "./GenerationAggregator";
 /** 超时阈值：超过该时长无更新且未收到 Stop 的 Generation 以 PARTIAL 上报。 */
 const PARTIAL_TIMEOUT_MS = 20 * 60 * 1000;
 const WRITE_SETTLE_MS = 1_000;
+const LOG_FINAL_SETTLE_MS = 30_000;
 
 /**
  * Generation 上传器（扩展进程）。周期性扫描本地 Generation 状态：
@@ -43,13 +44,16 @@ export class GenerationTelemetry implements vscode.Disposable {
   private async process(state: GenerationState): Promise<void> {
     // 等待同一批日志解析完毕，避免先上传 onAgentEnd、随后丢掉紧邻的最终 usage。
     if (Date.now() - state.updatedAtMs < WRITE_SETTLE_MS) return;
+    if (state.uploadedRevision !== undefined && state.uploadedRevision === state.revision) return;
+    if (state.status !== "RUNNING" && !state.structuredComplete &&
+        Date.now() - state.updatedAtMs < LOG_FINAL_SETTLE_MS) return;
     if (state.status === "RUNNING") {
       if (Date.now() - state.updatedAtMs < this.partialTimeoutMs) return; // 仍在进行
       state.status = "PARTIAL"; // 超时未收到 Stop，按 PARTIAL 上报避免滞留
     }
     try {
       await this.client.recordGeneration(toPayload(state));
-      await this.store.removeIfUnchanged(state.generationId, state.updatedAtMs);
+      await this.store.markUploaded(state.generationId, state.revision ?? 0, state.status);
     } catch (error) {
       this.logger.error(error); // 保留状态，下轮重试
     }
@@ -76,6 +80,7 @@ export function toPayload(state: GenerationState): Record<string, unknown> {
     startedAt: state.startedAt,
     endedAt: state.endedAt,
     durationMs: state.durationMs,
+    durationSource: state.durationSource,
     projectKey: state.projectKey,
     projectName: state.projectName,
     projectSource: state.projectSource,
@@ -86,5 +91,15 @@ export function toPayload(state: GenerationState): Record<string, unknown> {
     toolCallCount: state.toolCallCount,
     toolFailureCount: state.toolFailureCount,
     status: state.status,
+    revision: state.revision,
+    captureQuality: state.captureQuality,
+    modelId: state.modelId,
+    modelName: state.modelName,
+    skillInvocations: state.skillInvocations,
+    observedLog: state.sourcesSeen?.includes("LOG_EXTHOST") ?? false,
+    observedStructured: state.sourcesSeen?.includes("STRUCTURED") ?? false,
+    tokenMismatch: state.tokenMismatch ?? false,
+    codeSource: state.codeSource,
+    ingestLagMs: state.ingestLagMs,
   };
 }

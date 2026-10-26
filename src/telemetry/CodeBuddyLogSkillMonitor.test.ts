@@ -12,6 +12,33 @@ const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true }))); });
 
 describe("CodeBuddyLogSkillMonitor", () => {
+  it("reads the extension log fallback and parses its bracketed slash timestamp", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "yantu-log-monitor-")); temporary.push(root);
+    const home = path.join(root, "home");
+    const extensionRoot = path.join(root, "extension-logs");
+    const directory = path.join(extensionRoot, "2026-10-26");
+    await fs.mkdir(directory, { recursive: true });
+    const file = path.join(directory, "project__hash.log");
+    await fs.writeFile(file, `Workspace Path: ${root}\n`);
+    await writeMarker(path.join(home, ".codebuddy", "skills", "code-review"), "code-review", 283);
+    const queue = new TelemetryQueue(home);
+    const monitor = new CodeBuddyLogSkillMonitor(console, { homeDirectory: home,
+      logRoots: [], extensionLogRoot: extensionRoot, queue, structuredPollIntervalMs: 0 });
+    await monitor.poll();
+    await fs.appendFile(file, [
+      "[2026/10/26 08:54:00.000] [AgentReporter] onAgentStart: userInput=review agent=x mode=x conversationId=session-fallback requestId=request-fallback",
+      "[2026/10/26 08:54:01.000] [StreamParser] tool-call-streaming-start 开始解析: call-fallback - use_skill",
+      "[2026/10/26 08:54:03.000] [StreamParser] 参数解析完成: call-fallback - 参数: command - 值: code-review",
+      "",
+    ].join("\n"));
+    await monitor.poll();
+    const files = await queue.pendingMetadata();
+    expect(files).toHaveLength(1);
+    expect(await queue.readMetadata(files[0]!)).toMatchObject({
+      invokedAt: new Date("2026-10-26T08:54:03.000").toISOString(), localDirectory: root,
+    });
+  });
+
   it("captures only marked platform Skills and keeps window contexts isolated", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "yantu-log-monitor-")); temporary.push(root);
     const home = path.join(root, "home");
@@ -113,7 +140,7 @@ describe("CodeBuddyLogSkillMonitor", () => {
     expect(generation.skillInvocations.map((item: { skillKey: string }) => item.skillKey)).toEqual(["code-review", "security-review"]);
   });
 
-  it("completes the previous sampled Generation when the next turn starts", async () => {
+  it("does not infer completion just because another turn starts", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "yantu-log-monitor-")); temporary.push(root);
     const home = path.join(root, "home");
     const logs = path.join(root, "logs");
@@ -129,8 +156,8 @@ describe("CodeBuddyLogSkillMonitor", () => {
     const directory = path.join(home, ".codebuddy", "yantu-assistant", "telemetry", "generations");
     const files = await fs.readdir(directory);
     const generation = JSON.parse(await fs.readFile(path.join(directory, files[0]!), "utf8"));
-    expect(generation.status).toBe("COMPLETED");
-    expect(generation.durationMs).toBe(60_000);
+    expect(generation.status).toBe("RUNNING");
+    expect(generation.durationMs).toBeUndefined();
   });
 
   it("collects exact usage, model calls, all tool calls, failures and file changes for a completed sampled turn", async () => {
@@ -162,7 +189,7 @@ describe("CodeBuddyLogSkillMonitor", () => {
       inputTokens: 300, outputTokens: 20, totalTokens: 320,
       cacheReadTokens: 250, cacheWriteTokens: 2, cacheMissTokens: 50,
       thinkingTokens: 7, lastTokens: 170, modelCallCount: 2,
-      source: "CODEBUDDY_UPSTREAM_USAGE", quality: "EXACT",
+      source: "LOG_FINAL_USAGE", quality: "EXACT",
     }));
     expect(generation.fileDiffs).toEqual([expect.objectContaining({
       extension: "java", category: "JAVA", linesAdded: 12, linesDeleted: 3, modified: true,
