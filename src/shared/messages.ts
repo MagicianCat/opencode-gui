@@ -25,6 +25,7 @@ export const WebviewMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("send-message"), content: z.string().trim().min(1).max(10000) }), z.object({ type: z.literal("cancel-run") }),
   z.object({ type: z.literal("install-skill"), runKey: z.string(), skillKey: z.string() }), z.object({ type: z.literal("install-all"), runKey: z.string() }),
   z.object({ type: z.literal("open-detail"), detailPath: z.string() }), z.object({ type: z.literal("install-updates"), skillKeys: z.array(z.string()).min(1) }), z.object({ type: z.literal("dismiss-updates") }), z.object({ type: z.literal("retry-updates") }), z.object({ type: z.literal("refresh") }),
+  z.object({ type: z.literal("download-wiki"), documentIds: z.array(z.number().int().positive()).min(1).max(20) }),
 ]);
 export type WebviewMessage = z.infer<typeof WebviewMessageSchema>;
 export function parseHostMessage(data: unknown): HostMessage | null { const result = HostMessageSchema.safeParse(data); return result.success ? result.data : null; }

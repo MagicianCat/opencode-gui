@@ -40,6 +40,7 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       case "install-skill": getLogger().info(`[SkillInstall] 收到单项安装请求 runKey=${message.runKey} skillKey=${message.skillKey}`); await this.install(message.runKey, [message.skillKey]); break;
       case "install-all": { const skillKeys = [...new Set(this.state.recommendations.filter(item => (item.runKey ?? this.state.currentRunKey) === message.runKey && (item.status === "missing" || item.status === "update")).map(item => item.skillKey))]; getLogger().info(`[SkillInstall] 收到本轮批量安装请求 runKey=${message.runKey} skillCount=${skillKeys.length} skills=${skillKeys.join(",")}`); await this.install(message.runKey, skillKeys); break; }
       case "open-detail": await this.openDetail(message.detailPath); break;
+      case "download-wiki": await this.downloadWiki(message.documentIds); break;
       case "install-updates": await this.installUpdates(message.skillKeys); break;
       case "dismiss-updates": this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.sendState(); break;
       case "retry-updates": await this.checkSkillUpdates(); break;
@@ -146,6 +147,16 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private projectRoot(): string | undefined { const active = vscode.window.activeTextEditor && vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri); return active?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath; }
   private async chooseProjectRoot(): Promise<string | undefined> { const active = vscode.window.activeTextEditor && vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri); if (active) return active.uri.fsPath; const folders = vscode.workspace.workspaceFolders ?? []; if (folders.length <= 1) return folders[0]?.uri.fsPath; const picked = await vscode.window.showQuickPick(folders.map(folder => ({ label: folder.name, description: folder.uri.fsPath, value: folder.uri.fsPath })), { placeHolder: "选择要安装 Skill 的工作区" }); return picked?.value; }
   private webBaseUrl(): string { return validateServiceBaseUrl(machineSetting("webBaseUrl", this.defaultWebBaseUrl)).toString(); }
+  private async downloadWiki(documentIds: number[]): Promise<void> {
+    const ids = [...new Set(documentIds)];
+    const single = ids.length === 1;
+    const filename = single ? `wiki-${ids[0]}.md` : "wiki-documents.zip";
+    const target = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(path.join(os.homedir(), filename)), filters: single ? { "Markdown 文件": ["md"] } : { "ZIP 文件": ["zip"] } });
+    if (!target) return;
+    const bytes = single ? await this.client.downloadWikiDocument(ids[0]!) : await this.client.downloadWikiDocuments(ids);
+    await vscode.workspace.fs.writeFile(target, bytes);
+    this.notice("info", `已下载 ${ids.length} 篇 Wiki 文档`);
+  }
   private async openDetail(detailPath: string): Promise<void> { const base = new URL(this.webBaseUrl()); const target = new URL(detailPath, base); if (target.origin !== base.origin) throw new Error("Skill 详情链接不属于已配置的平台地址"); await vscode.env.openExternal(vscode.Uri.parse(target.toString())); }
   private fail(error: unknown): void { const message = error instanceof Error ? error.message : String(error); getLogger().error(formatDiagnosticError(error)); this.state.running = false; if (error instanceof ServiceUrlValidationError) { this.state.error = undefined; this.sendState(); return; } this.state.error = message; this.sendState(); this.notice("error", message); }
   private notice(level: "info" | "error", message: string): void { void this.post({ type: "notice", level, message }); }

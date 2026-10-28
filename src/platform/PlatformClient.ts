@@ -101,6 +101,16 @@ export class PlatformClient {
   }
 
   async cancelRun(runKey: string): Promise<void> { await this.request(`/agent/runs/${encodeURIComponent(runKey)}:cancel`, { method: "POST" }); }
+  async downloadWikiDocuments(documentIds: number[]): Promise<Buffer> {
+    const response = await this.authorizedFetch("/wiki/documents:download", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ documentIds }),
+    }, true);
+    return Buffer.from(await response.arrayBuffer());
+  }
+  async downloadWikiDocument(documentId: number): Promise<Buffer> {
+    const response = await this.authorizedFetch(`/wiki/documents/${documentId}/download`, {}, true);
+    return Buffer.from(await response.arrayBuffer());
+  }
   async recordSkillUsage(metadata: SkillUsageMetadata): Promise<void> {
     const { conversationFile: _conversationFile, transcriptPath: _transcriptPath, messageIds: _messageIds, ...body } = metadata;
     await this.request("/telemetry/skill-usage-events", { method: "POST", headers: { "Idempotency-Key": metadata.eventId }, body: JSON.stringify(body) });
