@@ -1,6 +1,14 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { marked } from "marked";
 import { vscode } from "./utils/vscode";
+import { parseHostMessage } from "../shared/messages";
+
+const [wikiTitles, setWikiTitles] = createSignal<Record<number, string>>({});
+const requestedTitles = new Set<number>();
+window.addEventListener("message", event => {
+  const message = parseHostMessage(event.data);
+  if (message?.type === "wiki-metadata") setWikiTitles(current => ({ ...current, [message.documentId]: message.title }));
+});
 
 interface WikiDocument { id: number; title: string }
 function wikiId(href: string): number | undefined {
@@ -24,6 +32,13 @@ function citedDocuments(markdown: string): WikiDocument[] {
 }
 export function WikiDownloads(props: { content: string }) {
   const documents = createMemo(() => citedDocuments(props.content));
+  createEffect(() => {
+    for (const document of documents()) {
+      if (requestedTitles.has(document.id)) continue;
+      requestedTitles.add(document.id);
+      vscode.postMessage({ type: "wiki-metadata-request", documentId: document.id });
+    }
+  });
   const [selection, setSelection] = createSignal<number[] | undefined>();
   const selected = () => selection() ?? documents().slice(0, 20).map(document => document.id);
   const toggle = (id: number) => setSelection(current => {
@@ -34,7 +49,7 @@ export function WikiDownloads(props: { content: string }) {
     <section class="wiki-downloads" aria-label="引用的 Wiki 文档">
       <div class="wiki-downloads-head"><strong>引用的 Wiki 文档</strong><button onClick={() => setSelection(documents().slice(0, 20).map(document => document.id))}>全选</button></div>
       <For each={documents()}>{document => <div class="wiki-download-row">
-        <label><input type="checkbox" checked={selected().includes(document.id)} onChange={() => toggle(document.id)} />{document.title}</label>
+        <label><input type="checkbox" checked={selected().includes(document.id)} onChange={() => toggle(document.id)} />{wikiTitles()[document.id] ?? (document.title.startsWith("Wiki 文档 #") ? "正在读取文档名称…" : document.title)}</label>
         <button onClick={() => vscode.postMessage({ type: "download-wiki", documentIds: [document.id] })}>下载</button>
       </div>}</For>
       <button class="primary compact" disabled={!selected().length} onClick={() => vscode.postMessage({ type: "download-wiki", documentIds: selected().slice(0, 20) })}>一键下载（{selected().length}）</button>

@@ -15,6 +15,7 @@ export const SkillUpdateSchema = z.object({ skillKey: z.string(), name: z.string
 export type SkillUpdate = z.infer<typeof SkillUpdateSchema>;
 
 export const HostMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("wiki-metadata"), documentId: z.number().int().positive(), title: z.string() }),
   z.object({ type: z.literal("state"), authenticated: z.boolean(), loginPending: z.boolean().optional(), userCode: z.string().optional(), osType: OsTypeSchema, sessions: z.array(SessionSchema), currentSessionKey: z.string().optional(), currentRunKey: z.string().optional(), messages: z.array(ChatMessageSchema), recommendations: z.array(RecommendationSchema), skillUpdates: z.array(SkillUpdateSchema).default([]), updatesChecking: z.boolean().default(false), updatesInstalling: z.boolean().default(false), updateError: z.string().optional(), running: z.boolean(), connection: z.enum(["idle", "connecting", "connected", "reconnecting", "closed"]), error: z.string().optional() }),
   z.object({ type: z.literal("notice"), level: z.enum(["info", "error"]), message: z.string() }),
 ]);
@@ -26,6 +27,7 @@ export const WebviewMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("install-skill"), runKey: z.string(), skillKey: z.string() }), z.object({ type: z.literal("install-all"), runKey: z.string() }),
   z.object({ type: z.literal("open-detail"), detailPath: z.string() }), z.object({ type: z.literal("install-updates"), skillKeys: z.array(z.string()).min(1) }), z.object({ type: z.literal("dismiss-updates") }), z.object({ type: z.literal("retry-updates") }), z.object({ type: z.literal("refresh") }),
   z.object({ type: z.literal("download-wiki"), documentIds: z.array(z.number().int().positive()).min(1).max(20) }),
+  z.object({ type: z.literal("wiki-metadata-request"), documentId: z.number().int().positive() }),
 ]);
 export type WebviewMessage = z.infer<typeof WebviewMessageSchema>;
 export function parseHostMessage(data: unknown): HostMessage | null { const result = HostMessageSchema.safeParse(data); return result.success ? result.data : null; }

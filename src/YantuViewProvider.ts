@@ -41,6 +41,11 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       case "install-all": { const skillKeys = [...new Set(this.state.recommendations.filter(item => (item.runKey ?? this.state.currentRunKey) === message.runKey && (item.status === "missing" || item.status === "update")).map(item => item.skillKey))]; getLogger().info(`[SkillInstall] 收到本轮批量安装请求 runKey=${message.runKey} skillCount=${skillKeys.length} skills=${skillKeys.join(",")}`); await this.install(message.runKey, skillKeys); break; }
       case "open-detail": await this.openDetail(message.detailPath); break;
       case "download-wiki": await this.downloadWiki(message.documentIds); break;
+      case "wiki-metadata-request": {
+        const title = await this.client.wikiDocumentMetadata(message.documentId).then(value => value.title, () => "文档已不可访问");
+        void this.post({ type: "wiki-metadata", documentId: message.documentId, title });
+        break;
+      }
       case "install-updates": await this.installUpdates(message.skillKeys); break;
       case "dismiss-updates": this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.sendState(); break;
       case "retry-updates": await this.checkSkillUpdates(); break;

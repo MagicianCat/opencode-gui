@@ -111,6 +111,11 @@ export class PlatformClient {
     const response = await this.authorizedFetch(`/wiki/documents/${documentId}/download`, {}, true);
     return Buffer.from(await response.arrayBuffer());
   }
+  async wikiDocumentMetadata(documentId: number): Promise<{ id: number; title: string }> {
+    const value = asRecord(await this.request(`/wiki/documents/${documentId}/metadata`));
+    if (value.id !== documentId || typeof value.title !== "string") throw new Error("文档名称响应无效");
+    return { id: documentId, title: value.title };
+  }
   async recordSkillUsage(metadata: SkillUsageMetadata): Promise<void> {
     const { conversationFile: _conversationFile, transcriptPath: _transcriptPath, messageIds: _messageIds, ...body } = metadata;
     await this.request("/telemetry/skill-usage-events", { method: "POST", headers: { "Idempotency-Key": metadata.eventId }, body: JSON.stringify(body) });
