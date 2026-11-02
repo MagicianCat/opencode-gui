@@ -9,6 +9,8 @@ const MAX_SESSIONS = 500;
 
 type Json = Record<string, unknown>;
 export interface StructuredSkillCall { skillKey: string; toolCallId: string; invokedAt: string; }
+export interface StructuredCommandCall { commandName: string; promptPath?: string; triggerType: "MENU" | "TYPED";
+  evidenceType: "STRUCTURED_COMMAND" | "ACTION_FILE_READ"; invokedAt: string; }
 export interface StructuredConversationMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; }
 export interface StructuredTurn {
   nativeInstallationId: string;
@@ -23,6 +25,7 @@ export interface StructuredTurn {
   modelName?: string;
   toolCallCount: number;
   skillCalls: StructuredSkillCall[];
+  commandCalls: StructuredCommandCall[];
   fileDiffs?: FileDiffMetric[];
   workspace?: string;
   conversationMessages: StructuredConversationMessage[];
@@ -38,11 +41,13 @@ export class CodeBuddyStructuredSessionScanner {
   private initialized = false;
   private pending: Record<string, string> = {};
 
-  constructor(options: { homeDirectory?: string; localAppDataDirectory?: string; backfillDays?: number; now?: () => Date } = {}) {
+  constructor(options: { homeDirectory?: string; localAppDataDirectory?: string; backfillDays?: number;
+    cursorName?: string; now?: () => Date } = {}) {
     const home = options.homeDirectory ?? os.homedir();
     this.dataRoot = path.join(options.localAppDataDirectory ?? process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"),
       "CodeBuddyExtension", "Data");
-    this.cursorFile = path.join(home, ".codebuddy", "yantu-assistant", "telemetry", "structured-cursor.json");
+    this.cursorFile = path.join(home, ".codebuddy", "yantu-assistant", "telemetry",
+      options.cursorName ?? "structured-cursor.json");
     this.backfillMs = (options.backfillDays ?? 7) * 24 * 60 * 60 * 1000;
     this.now = options.now ?? (() => new Date());
   }
@@ -98,6 +103,8 @@ export class CodeBuddyStructuredSessionScanner {
               hasUnstableMessages = true;
             }
             const calls = new Map<string, StructuredSkillCall>();
+            const commandCandidates: StructuredCommandCall[] = [];
+            const readPaths = new Set<string>();
             const turnMessages: StructuredConversationMessage[] = [];
             const toolIds = new Set<string>();
             let modelId: string | undefined;
@@ -111,6 +118,10 @@ export class CodeBuddyStructuredSessionScanner {
               const createdAt = timestamp(msg.createdAt);
               if (createdAt && (!endedAt || createdAt > endedAt)) endedAt = createdAt;
               const role = string(msg.role)?.toLowerCase();
+              if (role === "user") {
+                const candidate = commandCandidate(extra, createdAt ?? startedAt);
+                if (candidate) commandCandidates.push(candidate);
+              }
               const content = messageText(msg.message);
               if ((role === "user" || role === "assistant") && createdAt && content) {
                 const id = role === "user" && !conversationMessages.some(message => message.id === `${requestId}-user`)
@@ -120,6 +131,12 @@ export class CodeBuddyStructuredSessionScanner {
                 conversationMessages.push(textMessage);
               }
               for (const tool of toolEntries(msg.message ?? msg)) {
+                const toolName = string(tool.toolName) ?? string(tool.name);
+                if (toolName === "read_file") {
+                  const args = object(tool.args) ?? object(tool.arguments) ?? object(tool.parameters) ?? object(tool.input);
+                  const file = string(args?.filePath) ?? string(args?.path);
+                  if (file) readPaths.add(normalizePath(file));
+                }
                 const callId = string(tool.toolCallId) ?? string(tool.callId) ?? string(tool.id);
                 if (!callId) continue;
                 toolIds.add(callId);
@@ -131,11 +148,17 @@ export class CodeBuddyStructuredSessionScanner {
               }
             }
             if (!withinBackfill) continue;
+            const commandCalls = commandCandidates.flatMap(candidate => {
+              if (candidate.triggerType === "MENU") return [candidate];
+              const match = [...readPaths].find(file => file.endsWith(`/actions/${candidate.commandName}.md`) &&
+                file.includes("/.asdm/toolsets/"));
+              return match ? [{ ...candidate, promptPath: match.slice(match.indexOf(".asdm/toolsets/")) }] : [];
+            });
             const diffs = fileTree ? fileMetrics(fileTree, requestId) : undefined;
             const messageEvidence = turnMessages.map(message => [message.id, message.role,
               createHash("sha256").update(message.content).digest("hex")]);
             const requestFingerprint = createHash("sha256").update(JSON.stringify(request) +
-              JSON.stringify(diffs ?? null) + JSON.stringify([...calls.values()]) +
+              JSON.stringify(diffs ?? null) + JSON.stringify([...calls.values()]) + JSON.stringify(commandCalls) +
               JSON.stringify([modelId, modelName, endedAt, messageEvidence])).digest("hex");
             const requestKey = `request:${key}/${requestId}`;
             if (this.fingerprints[requestKey] === requestFingerprint) continue;
@@ -143,7 +166,7 @@ export class CodeBuddyStructuredSessionScanner {
             sessionTurns.push({ nativeInstallationId: installation, workspaceHash, conversationId, requestId, startedAt, status,
               endedAt: status === "RUNNING" ? undefined : endedAt,
               usage: rawUsage && status !== "RUNNING" ? usage(rawUsage) : undefined,
-              modelId, modelName, toolCallCount: toolIds.size, skillCalls: [...calls.values()],
+              modelId, modelName, toolCallCount: toolIds.size, skillCalls: [...calls.values()], commandCalls,
               fileDiffs: diffs?.length ? diffs : undefined, workspace: string(index.workspacePath) ?? string(index.workspace) ??
                 string(request.workspacePath), conversationMessages });
             sessionPending[requestKey] = requestFingerprint;
@@ -206,6 +229,21 @@ function object(value: unknown): Json | undefined {
     try { value = JSON.parse(value); } catch { return undefined; }
   }
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
+}
+function normalizePath(value: string): string { return value.replace(/\\/g, "/").replace(/^@/, "").toLowerCase(); }
+function commandCandidate(extra: Json | undefined, invokedAt: string): StructuredCommandCall | undefined {
+  if (!extra) return undefined;
+  const blocks = Array.isArray(extra.sourceContentBlocks) ? extra.sourceContentBlocks.map(object) : [];
+  const resource = blocks.find(block => object(block?._meta)?.mentionType === "command");
+  const meta = object(resource?._meta);
+  const phrase = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object).find(item => item?.type === "command") : undefined;
+  const menuName = string(meta?.commandName) ?? string(extra.command) ?? string(phrase?.content);
+  if (menuName && /^[a-z][\w-]{0,127}$/i.test(menuName))
+    return { commandName: menuName, promptPath: string(meta?.prompt)?.replace(/^@/, ""),
+      triggerType: "MENU", evidenceType: "STRUCTURED_COMMAND", invokedAt };
+  const normal = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object).find(item => item?.type === "normal") : undefined;
+  const typed = string(normal?.content)?.match(/^\/([a-z][\w-]{0,127})(?:\s|$)/i);
+  return typed ? { commandName: typed[1]!, triggerType: "TYPED", evidenceType: "ACTION_FILE_READ", invokedAt } : undefined;
 }
 function string(value: unknown): string | undefined { return typeof value === "string" && value ? value : undefined; }
 function number(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }

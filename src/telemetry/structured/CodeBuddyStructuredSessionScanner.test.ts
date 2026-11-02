@@ -25,6 +25,53 @@ async function fixture() {
 }
 
 describe("CodeBuddy structured session", () => {
+  it("records installed ASDM menu and verified typed commands once, ignoring plain slash text", async () => {
+    const { root, home, local, native, session } = await fixture();
+    const project = path.join(root, "project");
+    const workspaceHash = createHash("md5").update(project.replace(/\//g, "\\")).digest("hex");
+    const projectSession = path.join(native, "history", workspaceHash, "conversation-1");
+    await fs.rename(path.dirname(session), path.dirname(projectSession));
+    for (const name of ["code-review", "asdm-req-context-init"]) {
+      const toolset = name === "code-review" ? "code-dev" : "context-builder-requirements";
+      const action = `.asdm/toolsets/${toolset}/actions/${name}.md`;
+      await fs.mkdir(path.join(project, ".codebuddy", "commands"), { recursive: true });
+      await fs.mkdir(path.dirname(path.join(project, action)), { recursive: true });
+      await fs.writeFile(path.join(project, ".codebuddy", "commands", `${name}.md`), `@${action}`);
+      await fs.writeFile(path.join(project, action), "action");
+    }
+    const started = new Date("2026-10-26T11:30:00Z").getTime();
+    await fs.writeFile(path.join(projectSession, "index.json"), JSON.stringify({ workspacePath: project, requests: [
+      { id: "menu", startedAt: started, state: "complete", messages: ["menu-msg"] },
+      { id: "typed", startedAt: started + 1000, state: "complete", messages: ["typed-msg", "read-msg"] },
+      { id: "plain", startedAt: started + 2000, state: "complete", messages: ["plain-msg"] },
+    ] }));
+    const messages = path.join(projectSession, "messages");
+    await fs.writeFile(path.join(messages, "menu-msg.json"), JSON.stringify({ role: "user", createdAt: started,
+      extra: JSON.stringify({ requestId: "menu", command: "code-review", sourceContentBlocks: [{ type: "resource_link",
+        _meta: { mentionType: "command", commandName: "code-review",
+          prompt: "@.asdm/toolsets/code-dev/actions/code-review.md" } }] }) }));
+    for (const id of ["typed", "plain"]) await fs.writeFile(path.join(messages, `${id}-msg.json`),
+      JSON.stringify({ role: "user", createdAt: started + 1000, extra: JSON.stringify({ requestId: id,
+        command: "", inputPhrase: [{ type: "normal", content: "/asdm-req-context-init" }] }) }));
+    await fs.writeFile(path.join(messages, "read-msg.json"), JSON.stringify({ role: "assistant", createdAt: started + 1200,
+      extra: { requestId: "typed" }, message: { toolName: "read_file", toolCallId: "read-1",
+        args: { filePath: path.join(project, ".asdm/toolsets/context-builder-requirements/actions/asdm-req-context-init.md") } } }));
+    const queue = new TelemetryQueue(home);
+    const monitor = new CodeBuddyLogSkillMonitor(console, { homeDirectory: home, localAppDataDirectory: local,
+      logRoots: [], activeWorkspaceDirectory: project, queue, generationStore: new GenerationStateStore(home),
+      structuredPollIntervalMs: 0, now: () => new Date("2026-10-26T12:00:00Z") });
+    await monitor.poll();
+    const files = await queue.pendingCommands();
+    expect(files).toHaveLength(2);
+    const commands = await Promise.all(files.map(file => queue.readCommand(file)));
+    expect(commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ commandName: "code-review", toolsetName: "code-dev", triggerType: "MENU" }),
+      expect.objectContaining({ commandName: "asdm-req-context-init", triggerType: "TYPED",
+        evidenceType: "ACTION_FILE_READ" }),
+    ]));
+    await monitor.poll();
+    expect(await queue.pendingCommands()).toHaveLength(2);
+  });
   it("reuses a legacy event id during backfill instead of recording a second Skill call", async () => {
     const { home, local, session } = await fixture();
     const marker = path.join(home, ".codebuddy", "skills", "code-review");

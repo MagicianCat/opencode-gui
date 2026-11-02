@@ -17,6 +17,10 @@ export class TelemetryUploader implements vscode.Disposable {
     this.running = true;
     try {
       for (const file of await this.queue.pendingMetadata()) await this.uploadMetadata(file);
+      for (const file of await this.queue.pendingCommands()) {
+        await this.client.recordCommandUsage(await this.queue.readCommand(file));
+        await this.queue.remove(file);
+      }
       for (const file of await this.queue.pendingConversations()) await this.uploadConversation(file);
     } catch (error) { this.logger.error(error); } finally { this.running = false; }
   }

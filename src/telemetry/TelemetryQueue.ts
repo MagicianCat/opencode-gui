@@ -9,16 +9,24 @@ export interface SkillUsageMetadata {
   client: string; clientVersion?: string; agentType?: string; model?: string;
   conversationFile?: string; transcriptPath?: string; messageIds?: string[];
 }
+export interface CommandUsageMetadata {
+  eventId: string; commandName: string; toolsetName?: string; triggerType: "MENU" | "TYPED";
+  evidenceType: "STRUCTURED_COMMAND" | "ACTION_FILE_READ"; installationId?: string;
+  clientSessionId: string; generationId: string; projectKey?: string; client: string;
+  clientVersion?: string; invokedAt: string;
+}
 
 export class TelemetryQueue {
   readonly root: string;
   readonly metadataDirectory: string;
   readonly conversationDirectory: string;
+  readonly commandDirectory: string;
 
   constructor(homeDirectory = os.homedir()) {
     this.root = path.join(homeDirectory, ".codebuddy", "yantu-assistant", "telemetry");
     this.metadataDirectory = path.join(this.root, "metadata");
     this.conversationDirectory = path.join(this.root, "conversations");
+    this.commandDirectory = path.join(this.root, "commands");
   }
 
   async enqueue(metadata: SkillUsageMetadata): Promise<void> {
@@ -40,6 +48,17 @@ export class TelemetryQueue {
   }
 
   async pendingMetadata(): Promise<string[]> { return this.files(this.metadataDirectory, ".json"); }
+  async enqueueCommand(metadata: CommandUsageMetadata): Promise<void> {
+    await fs.mkdir(this.commandDirectory, { recursive: true, mode: 0o700 });
+    const target = path.join(this.commandDirectory, `${metadata.eventId}.json`);
+    const temporary = path.join(this.commandDirectory, `.${metadata.eventId}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`);
+    await fs.writeFile(temporary, JSON.stringify(metadata) + "\n", { mode: 0o600, flag: "wx" });
+    await fs.rename(temporary, target);
+  }
+  async pendingCommands(): Promise<string[]> { return this.files(this.commandDirectory, ".json"); }
+  async readCommand(file: string): Promise<CommandUsageMetadata> {
+    return JSON.parse(await fs.readFile(file, "utf8")) as CommandUsageMetadata;
+  }
   async pendingConversations(): Promise<string[]> {
     const files = await this.files(this.conversationDirectory, ".json.gz");
     const timestamps = new Map(await Promise.all(files.map(async file => [file,

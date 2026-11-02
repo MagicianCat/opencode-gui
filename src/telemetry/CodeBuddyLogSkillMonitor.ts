@@ -69,6 +69,7 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
   private readonly queue: TelemetryQueue;
   private readonly generationStore: GenerationStateStore;
   private readonly structuredScanner: CodeBuddyStructuredSessionScanner;
+  private readonly commandScanner: CodeBuddyStructuredSessionScanner;
   private readonly structuredPollIntervalMs: number;
   private readonly structuredEnabled: boolean;
   private readonly extensionLogRoot: string;
@@ -105,6 +106,9 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
     this.generationStore = options.generationStore ?? new GenerationStateStore(this.home);
     this.structuredScanner = options.structuredScanner ?? new CodeBuddyStructuredSessionScanner({
       homeDirectory: this.home, localAppDataDirectory: options.localAppDataDirectory, now: options.now });
+    this.commandScanner = new CodeBuddyStructuredSessionScanner({ homeDirectory: this.home,
+      localAppDataDirectory: options.localAppDataDirectory, now: options.now,
+      cursorName: "structured-command-cursor.json" });
     this.structuredPollIntervalMs = options.structuredPollIntervalMs ?? 5_000;
     this.structuredEnabled = options.structuredEnabled ?? true;
     this.extensionLogRoot = options.extensionLogRoot ?? path.join(options.localAppDataDirectory ?? process.env.LOCALAPPDATA ??
@@ -142,6 +146,8 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
       if (this.structuredEnabled && Date.now() - this.lastStructuredPollAt >= this.structuredPollIntervalMs) {
         for (const turn of await this.structuredScanner.scan()) await this.applyStructured(turn);
         await this.structuredScanner.commit();
+        for (const turn of await this.commandScanner.scan()) await this.applyCommands(turn);
+        await this.commandScanner.commit();
         this.lastStructuredPollAt = Date.now();
       }
       await this.saveState();
@@ -424,6 +430,42 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
 
   private stableEventId(conversationId: string, requestId: string, callId: string): string {
     const bytes = Buffer.from(createHash("sha256").update(`CodeBuddyIDE|${conversationId}|${requestId}|${callId}`).digest().subarray(0, 16));
+    bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+    const hex = bytes.toString("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  private async applyCommands(turn: StructuredTurn): Promise<void> {
+    if (!turn.commandCalls.length) return;
+    const runtime = [...this.contexts.values()].flatMap(context => [...context.turns.values()])
+      .find(item => item.requestId === turn.requestId && item.conversationId === turn.conversationId);
+    const workspace = turn.workspace ?? [runtime?.workspace, this.activeWorkspaceDirectory]
+      .find(candidate => candidate && this.matchesWorkspaceHash(candidate, turn.workspaceHash));
+    const normalized = this.normalizeWorkspace(workspace);
+    if (!normalized || normalized === path.parse(normalized).root) return;
+    const project = await this.projectResolver.resolve(normalized);
+    for (const call of turn.commandCalls) {
+      if (!/^[a-z][\w-]{0,127}$/i.test(call.commandName)) continue;
+      const commandFile = path.join(normalized, ".codebuddy", "commands", `${call.commandName}.md`);
+      let definition: string;
+      try { definition = (await fs.readFile(commandFile, "utf8")).trim(); } catch { continue; }
+      const action = definition.match(/^@?\.asdm\/toolsets\/([\w-]+)\/actions\/([\w-]+\.md)$/);
+      if (!action || action[2] !== `${call.commandName}.md`) continue;
+      const expected = `.asdm/toolsets/${action[1]}/actions/${action[2]}`;
+      if (call.promptPath && call.promptPath.replace(/\\/g, "/").replace(/^@/, "").toLowerCase() !== expected.toLowerCase()) continue;
+      try { await fs.access(path.join(normalized, expected)); } catch { continue; }
+      const eventId = this.commandEventId(turn.nativeInstallationId, turn.conversationId, turn.requestId, call.commandName);
+      await this.queue.enqueueCommand({ eventId, commandName: call.commandName, toolsetName: action[1],
+        triggerType: call.triggerType, evidenceType: call.evidenceType, installationId: this.clientInstallationId,
+        clientSessionId: turn.conversationId, generationId: this.generationId(turn.requestId),
+        projectKey: project.projectKey, client: "CodeBuddyIDE", invokedAt: call.invokedAt });
+    }
+  }
+
+  private commandEventId(installation: string, conversation: string, request: string, command: string): string {
+    const bytes = Buffer.from(createHash("sha256").update(`CodeBuddyIDE|${installation}|${conversation}|${request}|${command}`)
+      .digest().subarray(0, 16));
     bytes[6] = (bytes[6]! & 0x0f) | 0x50;
     bytes[8] = (bytes[8]! & 0x3f) | 0x80;
     const hex = bytes.toString("hex");

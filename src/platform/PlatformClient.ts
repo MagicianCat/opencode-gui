@@ -4,6 +4,7 @@ import { z } from "zod/v4";
 import type { OsType, Session } from "../shared/messages";
 import { validateServiceBaseUrl } from "./ServiceUrl";
 import type { SkillUsageMetadata } from "../telemetry/TelemetryQueue";
+import type { CommandUsageMetadata } from "../telemetry/TelemetryQueue";
 
 const TOKEN_KEY = "yantuAssistant.refreshToken";
 const TokenSchema = z.object({ accessToken: z.string(), refreshToken: z.string().optional() }).passthrough();
@@ -119,6 +120,10 @@ export class PlatformClient {
   async recordSkillUsage(metadata: SkillUsageMetadata): Promise<void> {
     const { conversationFile: _conversationFile, transcriptPath: _transcriptPath, messageIds: _messageIds, ...body } = metadata;
     await this.request("/telemetry/skill-usage-events", { method: "POST", headers: { "Idempotency-Key": metadata.eventId }, body: JSON.stringify(body) });
+  }
+  async recordCommandUsage(metadata: CommandUsageMetadata): Promise<void> {
+    await this.request("/telemetry/command-usage-events", { method: "POST",
+      headers: { "Idempotency-Key": metadata.eventId }, body: JSON.stringify(metadata) });
   }
   async recordGeneration(payload: Record<string, unknown>): Promise<void> {
     await this.request("/telemetry/generations", { method: "POST", body: JSON.stringify(payload) });
