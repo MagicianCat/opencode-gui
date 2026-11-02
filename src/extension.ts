@@ -18,7 +18,8 @@ export function activate(context: vscode.ExtensionContext): void {
   void ensureClientInstallationId(context).then(
     id => logger.info(`clientInstallationId 已就绪：${id}`),
     error => logger.error(`clientInstallationId 初始化失败：${error}`));
-  const telemetry = new TelemetryUploader(client, { error: error => logger.error(String(error)) });
+  const telemetry = new TelemetryUploader(client, { info: message => logger.info(message),
+    error: error => logger.error(String(error)) });
   telemetry.start(); context.subscriptions.push(telemetry);
   const logSkillMonitor = new CodeBuddyLogSkillMonitor({ info: message => logger.info(message), error: message => logger.error(message) }, {
     activeWorkspaceDirectory: vscode.workspace.workspaceFolders?.length === 1 ? vscode.workspace.workspaceFolders[0]?.uri.fsPath : undefined,

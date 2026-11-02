@@ -12,6 +12,7 @@ export interface SkillUsageMetadata {
 export interface CommandUsageMetadata {
   eventId: string; commandName: string; toolsetName?: string; triggerType: "MENU" | "TYPED";
   evidenceType: "STRUCTURED_COMMAND" | "ACTION_FILE_READ"; installationId?: string;
+  reqId?: string; reqIdSource?: "ARGUMENT" | "REQUEST_FILE_TREE";
   clientSessionId: string; generationId: string; projectKey?: string; client: string;
   clientVersion?: string; invokedAt: string;
 }
@@ -21,12 +22,14 @@ export class TelemetryQueue {
   readonly metadataDirectory: string;
   readonly conversationDirectory: string;
   readonly commandDirectory: string;
+  readonly commandDiagnosticFile: string;
 
   constructor(homeDirectory = os.homedir()) {
     this.root = path.join(homeDirectory, ".codebuddy", "yantu-assistant", "telemetry");
     this.metadataDirectory = path.join(this.root, "metadata");
     this.conversationDirectory = path.join(this.root, "conversations");
     this.commandDirectory = path.join(this.root, "commands");
+    this.commandDiagnosticFile = path.join(this.root, "diagnostics", "command-usage.jsonl");
   }
 
   async enqueue(metadata: SkillUsageMetadata): Promise<void> {
@@ -50,7 +53,9 @@ export class TelemetryQueue {
   async pendingMetadata(): Promise<string[]> { return this.files(this.metadataDirectory, ".json"); }
   async enqueueCommand(metadata: CommandUsageMetadata): Promise<void> {
     await fs.mkdir(this.commandDirectory, { recursive: true, mode: 0o700 });
-    const target = path.join(this.commandDirectory, `${metadata.eventId}.json`);
+    const revision = metadata.reqId ? `-${createHash("sha256").update(`${metadata.reqId}|${metadata.reqIdSource ?? ""}`)
+      .digest("hex").slice(0, 12)}` : "";
+    const target = path.join(this.commandDirectory, `${metadata.eventId}${revision}.json`);
     const temporary = path.join(this.commandDirectory, `.${metadata.eventId}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`);
     await fs.writeFile(temporary, JSON.stringify(metadata) + "\n", { mode: 0o600, flag: "wx" });
     await fs.rename(temporary, target);
@@ -58,6 +63,13 @@ export class TelemetryQueue {
   async pendingCommands(): Promise<string[]> { return this.files(this.commandDirectory, ".json"); }
   async readCommand(file: string): Promise<CommandUsageMetadata> {
     return JSON.parse(await fs.readFile(file, "utf8")) as CommandUsageMetadata;
+  }
+  async commandDiagnostic(event: string, fields: Record<string, string | undefined>): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(this.commandDiagnosticFile), { recursive: true, mode: 0o700 });
+      await fs.appendFile(this.commandDiagnosticFile, JSON.stringify({ timestamp: new Date().toISOString(), event,
+        ...fields }) + "\n", { mode: 0o600 });
+    } catch { /* diagnostic failures must not block collection */ }
   }
   async pendingConversations(): Promise<string[]> {
     const files = await this.files(this.conversationDirectory, ".json.gz");

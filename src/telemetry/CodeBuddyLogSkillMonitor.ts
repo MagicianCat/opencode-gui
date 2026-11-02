@@ -108,7 +108,7 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
       homeDirectory: this.home, localAppDataDirectory: options.localAppDataDirectory, now: options.now });
     this.commandScanner = new CodeBuddyStructuredSessionScanner({ homeDirectory: this.home,
       localAppDataDirectory: options.localAppDataDirectory, now: options.now,
-      cursorName: "structured-command-cursor.json" });
+      cursorName: "structured-command-req-cursor.json" });
     this.structuredPollIntervalMs = options.structuredPollIntervalMs ?? 5_000;
     this.structuredEnabled = options.structuredEnabled ?? true;
     this.extensionLogRoot = options.extensionLogRoot ?? path.join(options.localAppDataDirectory ?? process.env.LOCALAPPDATA ??
@@ -443,24 +443,89 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
     const workspace = turn.workspace ?? [runtime?.workspace, this.activeWorkspaceDirectory]
       .find(candidate => candidate && this.matchesWorkspaceHash(candidate, turn.workspaceHash));
     const normalized = this.normalizeWorkspace(workspace);
-    if (!normalized || normalized === path.parse(normalized).root) return;
+    if (!normalized || normalized === path.parse(normalized).root) {
+      for (const call of turn.commandCalls)
+        await this.commandDiagnostic("skipped", turn, call.commandName, "workspace_unresolved");
+      return;
+    }
     const project = await this.projectResolver.resolve(normalized);
     for (const call of turn.commandCalls) {
-      if (!/^[a-z][\w-]{0,127}$/i.test(call.commandName)) continue;
+      if (!/^[a-z][\w-]{0,127}$/i.test(call.commandName)) {
+        await this.commandDiagnostic("skipped", turn, call.commandName, "invalid_command_name"); continue;
+      }
       const commandFile = path.join(normalized, ".codebuddy", "commands", `${call.commandName}.md`);
       let definition: string;
-      try { definition = (await fs.readFile(commandFile, "utf8")).trim(); } catch { continue; }
+      try { definition = (await fs.readFile(commandFile, "utf8")).trim(); }
+      catch { await this.commandDiagnostic("skipped", turn, call.commandName, "command_not_installed"); continue; }
       const action = definition.match(/^@?\.asdm\/toolsets\/([\w-]+)\/actions\/([\w-]+\.md)$/);
-      if (!action || action[2] !== `${call.commandName}.md`) continue;
+      if (!action || action[2] !== `${call.commandName}.md`) {
+        await this.commandDiagnostic("skipped", turn, call.commandName, "invalid_asdm_mapping"); continue;
+      }
       const expected = `.asdm/toolsets/${action[1]}/actions/${action[2]}`;
-      if (call.promptPath && call.promptPath.replace(/\\/g, "/").replace(/^@/, "").toLowerCase() !== expected.toLowerCase()) continue;
-      try { await fs.access(path.join(normalized, expected)); } catch { continue; }
+      if (call.promptPath && call.promptPath.replace(/\\/g, "/").replace(/^@/, "").toLowerCase() !== expected.toLowerCase()) {
+        await this.commandDiagnostic("skipped", turn, call.commandName, "prompt_mapping_mismatch"); continue;
+      }
+      try { await fs.access(path.join(normalized, expected)); }
+      catch { await this.commandDiagnostic("skipped", turn, call.commandName, "action_file_missing"); continue; }
+      if (!call.verified) {
+        await this.commandDiagnostic("skipped", turn, call.commandName, "action_read_unverified"); continue;
+      }
+      const req = await this.resolveCommandReq(normalized, action[1]!, call.commandName,
+        call.reqArgument, turn.reqIdsFromFiles);
       const eventId = this.commandEventId(turn.nativeInstallationId, turn.conversationId, turn.requestId, call.commandName);
       await this.queue.enqueueCommand({ eventId, commandName: call.commandName, toolsetName: action[1],
         triggerType: call.triggerType, evidenceType: call.evidenceType, installationId: this.clientInstallationId,
+        reqId: req?.id, reqIdSource: req?.source,
         clientSessionId: turn.conversationId, generationId: this.generationId(turn.requestId),
         projectKey: project.projectKey, client: "CodeBuddyIDE", invokedAt: call.invokedAt });
+      await this.commandDiagnostic("queued", turn, call.commandName, undefined, eventId);
+      if (req) await this.queue.commandDiagnostic("req_resolved", { eventId, commandName: call.commandName,
+        reqId: req.id, source: req.source });
+      this.logger.info(`已采集 ASDM 命令：${call.commandName}，事件 ${eventId}${req ? `，需求 ${req.id}` : ""}`);
     }
+  }
+
+  private async resolveCommandReq(workspace: string, toolset: string, command: string,
+      argument: string | undefined, fromFiles: string[]): Promise<{ id: string; source: "ARGUMENT" | "REQUEST_FILE_TREE" } | undefined> {
+    const scoped = toolset === "req-analyzer" || toolset === "system-design" && !command.startsWith("system-") ||
+      toolset === "code-dev" && ["prd-code", "prd-code-web", "code-review"].includes(command) ||
+      ["code-review", "testcase-design", "prototype-builder", "webui-autotest", "ui-automation-testing"].includes(toolset);
+    if (!scoped) return undefined;
+    const argumentAllowed = toolset === "req-analyzer" || toolset === "system-design" ||
+      toolset === "code-dev" && ["prd-code", "prd-code-web"].includes(command) ||
+      ["testcase-design", "prototype-builder", "webui-autotest"].includes(toolset);
+    const argumentId = argumentAllowed && argument ? await this.matchRequirementDirectory(workspace, argument,
+      toolset === "code-dev" && command === "prd-code") : undefined;
+    const fileIds = [...new Set(await Promise.all(fromFiles.map(async id =>
+      await this.matchRequirementDirectory(workspace, id) ?? id)))];
+    if (fileIds.length > 1 || argumentId && fileIds.length === 1 && argumentId !== fileIds[0]) return undefined;
+    if (argumentId) return { id: argumentId, source: "ARGUMENT" };
+    if (fileIds.length === 1) return { id: fileIds[0]!, source: "REQUEST_FILE_TREE" };
+    return undefined;
+  }
+
+  private async matchRequirementDirectory(workspace: string, value: string, taskCode = false): Promise<string | undefined> {
+    if (!/^REQ-[\p{L}\p{N}_-]{1,251}$/u.test(value)) return undefined;
+    const matches = new Set<string>();
+    for (const kind of ["requirements", "features"]) {
+      try {
+        for (const entry of await fs.readdir(path.join(workspace, ".asdm", "workspace", kind), { withFileTypes: true })) {
+          if (entry.isDirectory() && (entry.name === value || entry.name.startsWith(`${value}-`))) matches.add(entry.name);
+        }
+      } catch { /* this workspace may not use both ASDM layouts */ }
+    }
+    if (matches.size === 1) return [...matches][0];
+    if (matches.size > 1 || !taskCode) return undefined;
+    const featureId = value.match(/^REQ-\d+(?=-)/)?.[0];
+    if (!featureId) return undefined;
+    return this.matchRequirementDirectory(workspace, featureId);
+  }
+
+  private async commandDiagnostic(event: string, turn: StructuredTurn, commandName: string,
+      reason?: string, eventId?: string): Promise<void> {
+    await this.queue.commandDiagnostic(event, { eventId, commandName, reason,
+      triggerType: turn.commandCalls.find(call => call.commandName === commandName)?.triggerType,
+      conversationId: turn.conversationId, requestId: turn.requestId });
   }
 
   private commandEventId(installation: string, conversation: string, request: string, command: string): string {

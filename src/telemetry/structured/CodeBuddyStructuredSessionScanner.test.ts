@@ -25,6 +25,63 @@ async function fixture() {
 }
 
 describe("CodeBuddy structured session", () => {
+  it("attributes REQ from command arguments or the same request's ASDM files", async () => {
+    const { root, home, local, native, session } = await fixture();
+    const project = path.join(root, "project");
+    const workspaceHash = createHash("md5").update(project.replace(/\//g, "\\")).digest("hex");
+    const projectSession = path.join(native, "history", workspaceHash, "conversation-1");
+    await fs.rename(path.dirname(session), path.dirname(projectSession));
+    const definitions = [
+      ["overall-design", "system-design"], ["req-workflow", "req-analyzer"],
+      ["prd-code", "code-dev"], ["asdm-req-context-init", "context-builder-requirements"],
+      ["prototype-generate", "prototype-builder"],
+    ];
+    for (const [name, toolset] of definitions) {
+      const action = `.asdm/toolsets/${toolset}/actions/${name}.md`;
+      await fs.mkdir(path.join(project, ".codebuddy", "commands"), { recursive: true });
+      await fs.mkdir(path.dirname(path.join(project, action)), { recursive: true });
+      await fs.writeFile(path.join(project, ".codebuddy", "commands", `${name}.md`), `@${action}`);
+      await fs.writeFile(path.join(project, action), "action");
+    }
+    await fs.mkdir(path.join(project, ".asdm/workspace/requirements/REQ-001-secondshelf-mvp"), { recursive: true });
+    await fs.mkdir(path.join(project, ".asdm/workspace/requirements/REQ-010-user-auth"), { recursive: true });
+    const started = new Date("2026-10-26T11:30:00Z").getTime();
+    const requests = definitions.map(([name], i) => ({ id: `req-${i}`, startedAt: started + i * 1000,
+      state: "complete", messages: [`msg-${i}`] }));
+    await fs.writeFile(path.join(projectSession, "index.json"), JSON.stringify({ workspacePath: project, requests }));
+    const argumentsByName = [" REQ-001-secondshelf-mvp trm-sys", " --auto describe a need",
+      " REQ-010-INFRA-01", " REQ-001-secondshelf-mvp", ""];
+    for (const [i, [name, toolset]] of definitions.entries()) {
+      await fs.writeFile(path.join(projectSession, "messages", `msg-${i}.json`), JSON.stringify({ role: "user",
+        createdAt: started + i * 1000, extra: JSON.stringify({ requestId: `req-${i}`, command: name,
+          inputPhrase: [{ type: "command", content: name }, { type: "normal", content: argumentsByName[i] }],
+          sourceContentBlocks: [{ type: "resource_link", _meta: { mentionType: "command", commandName: name,
+            prompt: `@.asdm/toolsets/${toolset}/actions/${name}.md` } }] }) }));
+    }
+    const tree = path.join(native, "file-tree", workspaceHash, "conversation-1", "file-tree.json");
+    await fs.mkdir(path.dirname(tree), { recursive: true });
+    await fs.writeFile(tree, JSON.stringify([{ filePath: path.join(project,
+      ".asdm/workspace/requirements/REQ-001-secondshelf-mvp/clarification-notes.md"),
+      versions: [{ versionId: "v1", metadata: { requestId: "req-1" }, diff: { addedLines: 2 } }] },
+      { filePath: path.join(project, ".asdm/workspace/prototypes/REQ-010/index.html"),
+        versions: [{ versionId: "v2", metadata: { requestId: "req-4" }, diff: { addedLines: 5 } }] }]));
+    const queue = new TelemetryQueue(home);
+    const monitor = new CodeBuddyLogSkillMonitor(console, { homeDirectory: home, localAppDataDirectory: local,
+      logRoots: [], activeWorkspaceDirectory: project, queue, generationStore: new GenerationStateStore(home),
+      structuredPollIntervalMs: 0, now: () => new Date("2026-10-26T12:00:00Z") });
+    await monitor.poll();
+    const rows = await Promise.all((await queue.pendingCommands()).map(file => queue.readCommand(file)));
+    expect(rows).toHaveLength(5);
+    expect(rows.find(row => row.commandName === "overall-design")).toMatchObject({ reqId: "REQ-001-secondshelf-mvp",
+      reqIdSource: "ARGUMENT" });
+    expect(rows.find(row => row.commandName === "req-workflow")).toMatchObject({ reqId: "REQ-001-secondshelf-mvp",
+      reqIdSource: "REQUEST_FILE_TREE" });
+    expect(rows.find(row => row.commandName === "prd-code")).toMatchObject({ reqId: "REQ-010-user-auth",
+      reqIdSource: "ARGUMENT" });
+    expect(rows.find(row => row.commandName === "asdm-req-context-init")?.reqId).toBeUndefined();
+    expect(rows.find(row => row.commandName === "prototype-generate")).toMatchObject({
+      reqId: "REQ-010-user-auth", reqIdSource: "REQUEST_FILE_TREE" });
+  });
   it("records installed ASDM menu and verified typed commands once, ignoring plain slash text", async () => {
     const { root, home, local, native, session } = await fixture();
     const project = path.join(root, "project");
@@ -71,6 +128,23 @@ describe("CodeBuddy structured session", () => {
     ]));
     await monitor.poll();
     expect(await queue.pendingCommands()).toHaveLength(2);
+    const diagnostics = (await fs.readFile(queue.commandDiagnosticFile, "utf8")).trim().split("\n").map(JSON.parse);
+    expect(diagnostics.filter(row => row.event === "queued")).toHaveLength(2);
+    expect(diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ event: "skipped",
+      commandName: "asdm-req-context-init", reason: "action_read_unverified", requestId: "plain" })]));
+    expect(JSON.stringify(diagnostics)).not.toContain(project);
+    const before = commands.find(row => row.commandName === "code-review")!;
+    const tree = path.join(native, "file-tree", workspaceHash, "conversation-1", "file-tree.json");
+    await fs.mkdir(path.dirname(tree), { recursive: true });
+    await fs.writeFile(tree, JSON.stringify([{ filePath: path.join(project,
+      ".asdm/workspace/requirements/REQ-001-review/review.md"),
+      versions: [{ versionId: "v1", metadata: { requestId: "menu" }, diff: { addedLines: 1 } }] }]));
+    await monitor.poll();
+    const revisedRows = await Promise.all((await queue.pendingCommands()).map(file => queue.readCommand(file)));
+    expect(revisedRows).toHaveLength(3);
+    const after = revisedRows.find(row => row.commandName === "code-review" && row.reqId)!;
+    expect(after).toMatchObject({ eventId: before.eventId, reqId: "REQ-001-review",
+      reqIdSource: "REQUEST_FILE_TREE" });
   });
   it("reuses a legacy event id during backfill instead of recording a second Skill call", async () => {
     const { home, local, session } = await fixture();

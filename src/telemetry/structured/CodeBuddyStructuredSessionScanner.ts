@@ -10,7 +10,8 @@ const MAX_SESSIONS = 500;
 type Json = Record<string, unknown>;
 export interface StructuredSkillCall { skillKey: string; toolCallId: string; invokedAt: string; }
 export interface StructuredCommandCall { commandName: string; promptPath?: string; triggerType: "MENU" | "TYPED";
-  evidenceType: "STRUCTURED_COMMAND" | "ACTION_FILE_READ"; invokedAt: string; }
+  evidenceType: "STRUCTURED_COMMAND" | "ACTION_FILE_READ"; invokedAt: string; verified: boolean;
+  reqArgument?: string; }
 export interface StructuredConversationMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; }
 export interface StructuredTurn {
   nativeInstallationId: string;
@@ -26,6 +27,7 @@ export interface StructuredTurn {
   toolCallCount: number;
   skillCalls: StructuredSkillCall[];
   commandCalls: StructuredCommandCall[];
+  reqIdsFromFiles: string[];
   fileDiffs?: FileDiffMetric[];
   workspace?: string;
   conversationMessages: StructuredConversationMessage[];
@@ -119,7 +121,7 @@ export class CodeBuddyStructuredSessionScanner {
               if (createdAt && (!endedAt || createdAt > endedAt)) endedAt = createdAt;
               const role = string(msg.role)?.toLowerCase();
               if (role === "user") {
-                const candidate = commandCandidate(extra, createdAt ?? startedAt);
+                const candidate = commandCandidate(extra, createdAt ?? startedAt, messageText(msg.message));
                 if (candidate) commandCandidates.push(candidate);
               }
               const content = messageText(msg.message);
@@ -148,17 +150,19 @@ export class CodeBuddyStructuredSessionScanner {
               }
             }
             if (!withinBackfill) continue;
-            const commandCalls = commandCandidates.flatMap(candidate => {
+            const commandCalls = commandCandidates.map(candidate => {
               if (candidate.triggerType === "MENU") return [candidate];
               const match = [...readPaths].find(file => file.endsWith(`/actions/${candidate.commandName}.md`) &&
                 file.includes("/.asdm/toolsets/"));
-              return match ? [{ ...candidate, promptPath: match.slice(match.indexOf(".asdm/toolsets/")) }] : [];
-            });
+              return [{ ...candidate, promptPath: match?.slice(match.indexOf(".asdm/toolsets/")), verified: Boolean(match) }];
+            }).flat();
             const diffs = fileTree ? fileMetrics(fileTree, requestId) : undefined;
+            const reqIdsFromFiles = fileTree ? requirementIdsFromFiles(fileTree, requestId) : [];
             const messageEvidence = turnMessages.map(message => [message.id, message.role,
               createHash("sha256").update(message.content).digest("hex")]);
             const requestFingerprint = createHash("sha256").update(JSON.stringify(request) +
-              JSON.stringify(diffs ?? null) + JSON.stringify([...calls.values()]) + JSON.stringify(commandCalls) +
+              JSON.stringify(diffs ?? null) + JSON.stringify(reqIdsFromFiles) +
+              JSON.stringify([...calls.values()]) + JSON.stringify(commandCalls) +
               JSON.stringify([modelId, modelName, endedAt, messageEvidence])).digest("hex");
             const requestKey = `request:${key}/${requestId}`;
             if (this.fingerprints[requestKey] === requestFingerprint) continue;
@@ -167,6 +171,7 @@ export class CodeBuddyStructuredSessionScanner {
               endedAt: status === "RUNNING" ? undefined : endedAt,
               usage: rawUsage && status !== "RUNNING" ? usage(rawUsage) : undefined,
               modelId, modelName, toolCallCount: toolIds.size, skillCalls: [...calls.values()], commandCalls,
+              reqIdsFromFiles,
               fileDiffs: diffs?.length ? diffs : undefined, workspace: string(index.workspacePath) ?? string(index.workspace) ??
                 string(request.workspacePath), conversationMessages });
             sessionPending[requestKey] = requestFingerprint;
@@ -231,19 +236,51 @@ function object(value: unknown): Json | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
 }
 function normalizePath(value: string): string { return value.replace(/\\/g, "/").replace(/^@/, "").toLowerCase(); }
-function commandCandidate(extra: Json | undefined, invokedAt: string): StructuredCommandCall | undefined {
+function commandCandidate(extra: Json | undefined, invokedAt: string, message?: string): StructuredCommandCall | undefined {
   if (!extra) return undefined;
   const blocks = Array.isArray(extra.sourceContentBlocks) ? extra.sourceContentBlocks.map(object) : [];
   const resource = blocks.find(block => object(block?._meta)?.mentionType === "command");
   const meta = object(resource?._meta);
   const phrase = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object).find(item => item?.type === "command") : undefined;
   const menuName = string(meta?.commandName) ?? string(extra.command) ?? string(phrase?.content);
-  if (menuName && /^[a-z][\w-]{0,127}$/i.test(menuName))
+  if (menuName && /^[a-z][\w-]{0,127}$/i.test(menuName)) {
+    const parts = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object) : [];
+    const commandIndex = parts.findIndex(part => part?.type === "command");
+    const argument = commandIndex >= 0 ? parts.slice(commandIndex + 1).filter(part => part?.type === "normal")
+      .map(part => string(part?.content) ?? "").join("") : undefined;
+    const blocksText = blocks.slice(blocks.indexOf(resource) + 1).filter(block => block?.type === "text")
+      .map(block => string(block?.text) ?? "").join("");
     return { commandName: menuName, promptPath: string(meta?.prompt)?.replace(/^@/, ""),
-      triggerType: "MENU", evidenceType: "STRUCTURED_COMMAND", invokedAt };
+      triggerType: "MENU", evidenceType: "STRUCTURED_COMMAND", invokedAt, verified: true,
+      reqArgument: firstReqArgument(argument || blocksText) ?? reqFromUserQuery(message, menuName) };
+  }
   const normal = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object).find(item => item?.type === "normal") : undefined;
   const typed = string(normal?.content)?.match(/^\/([a-z][\w-]{0,127})(?:\s|$)/i);
-  return typed ? { commandName: typed[1]!, triggerType: "TYPED", evidenceType: "ACTION_FILE_READ", invokedAt } : undefined;
+  return typed ? { commandName: typed[1]!, triggerType: "TYPED", evidenceType: "ACTION_FILE_READ",
+    invokedAt, verified: false, reqArgument: firstReqArgument(string(normal?.content)?.slice(typed[0].length)) ??
+      reqFromUserQuery(message, typed[1]!) } : undefined;
+}
+function reqFromUserQuery(message: string | undefined, command: string): string | undefined {
+  if (!message) return undefined;
+  const userQuery = message.match(/<user_query>([\s\S]*?)<\/user_query>/)?.[1];
+  if (!userQuery) return undefined;
+  const prefix = userQuery.match(/^\s*(?:@command:\/\/|\/)([a-z][\w-]{0,127})(?:\s|$)/i);
+  return prefix?.[1] === command ? firstReqArgument(userQuery.slice(prefix[0].length)) : undefined;
+}
+function firstReqArgument(argument?: string): string | undefined {
+  return argument?.trimStart().match(/^(REQ-[\p{L}\p{N}_-]{1,251})(?=\s|$)/u)?.[1];
+}
+function requirementIdsFromFiles(files: unknown[], requestId: string): string[] {
+  const ids = new Set<string>();
+  for (const value of files) {
+    const file = object(value);
+    const filePath = string(file?.filePath)?.replace(/\\/g, "/");
+    if (!filePath || !Array.isArray(file?.versions) ||
+        !file.versions.some(version => object(object(version)?.metadata)?.requestId === requestId)) continue;
+    const match = filePath.match(/\.asdm\/workspace\/(?:requirements|features|prototypes)\/(REQ-[^/]+)(?:\/|$)/i);
+    if (match && /^REQ-[\p{L}\p{N}_-]{1,251}$/u.test(match[1]!)) ids.add(match[1]!);
+  }
+  return [...ids].sort();
 }
 function string(value: unknown): string | undefined { return typeof value === "string" && value ? value : undefined; }
 function number(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
