@@ -112,6 +112,15 @@ export class PlatformClient {
     const response = await this.authorizedFetch(`/wiki/documents/${documentId}/download`, {}, true);
     return Buffer.from(await response.arrayBuffer());
   }
+  async asdmToolMetadata(assetId: number): Promise<{ filename: string }> {
+    const value = asRecord(await this.request(`/asdm-tool-assets/${assetId}`));
+    if (typeof value.filename !== "string" || !value.filename.trim()) throw new Error("工具包文件名响应无效");
+    return { filename: value.filename };
+  }
+  async downloadAsdmTool(assetId: number): Promise<Buffer> {
+    const response = await this.authorizedFetch(`/asdm-tool-assets/${assetId}/download`, {}, true);
+    return Buffer.from(await response.arrayBuffer());
+  }
   async wikiDocumentMetadata(documentId: number): Promise<{ id: number; title: string }> {
     const value = asRecord(await this.request(`/wiki/documents/${documentId}/metadata`));
     if (value.id !== documentId || typeof value.title !== "string") throw new Error("文档名称响应无效");

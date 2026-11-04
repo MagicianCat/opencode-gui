@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as os from "node:os";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { PlatformClient, type DeviceLogin } from "./platform/PlatformClient";
 import { ServiceUrlValidationError, validateServiceBaseUrl } from "./platform/ServiceUrl";
@@ -9,23 +9,29 @@ import { SseClient, type SseEvent } from "./transport/SseClient";
 import { parseWebviewMessage, type ChatMessage, type HostMessage, type OsType, type Recommendation, type Session, type SkillUpdate, type WebviewMessage } from "./shared/messages";
 import { addInstallStatus, compareVersions, scanPlatformSkills, scanSkills, type PlatformSkill } from "./skills/SkillScanner";
 import { parseBundleDescriptor, SkillInstaller } from "./skills/SkillInstaller";
+import { AsdmInstaller } from "./skills/AsdmInstaller";
+import { ensureProjectIgnored } from "./skills/ProjectGitignore";
 import { getLogger, machineSetting } from "./extension";
 import { SerialTaskQueue } from "./utils/SerialTaskQueue";
 
-interface ViewState { authenticated: boolean; loginPending?: boolean; userCode?: string; osType: OsType; sessions: Session[]; currentSessionKey?: string; currentRunKey?: string; messages: ChatMessage[]; recommendations: Recommendation[]; skillUpdates: SkillUpdate[]; updatesChecking: boolean; updatesInstalling: boolean; updateError?: string; running: boolean; connection: "idle" | "connecting" | "connected" | "reconnecting" | "closed"; error?: string; }
+interface ViewState { authenticated: boolean; loginPending?: boolean; userCode?: string; osType: OsType; sessions: Session[]; currentSessionKey?: string; currentRunKey?: string; messages: ChatMessage[]; recommendations: Recommendation[]; asdmInstalled?: boolean; skillUpdates: SkillUpdate[]; updatesChecking: boolean; updatesInstalling: boolean; updateError?: string; running: boolean; connection: "idle" | "connecting" | "connected" | "reconnecting" | "closed"; error?: string; }
 interface UpdateCandidate extends SkillUpdate { versionIds: number[]; targets: Array<{ directory: string; scope: "project" | "global" }>; }
 
 export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = "yantu-assistant.chatView";
   private view?: vscode.WebviewView; private sse?: SseClient; private loginAttempt?: DeviceLogin; private disposed = false; private readonly installer = new SkillInstaller(); private readonly eventQueue = new SerialTaskQueue(error => this.fail(error));
+  private readonly asdmInstaller = new AsdmInstaller();
+  private readonly ignoredAsdmRoots = new Set<string>();
+  private readonly workspaceListeners: vscode.Disposable[] = [];
   private state: ViewState = { authenticated: false, osType: detectOs(), sessions: [], messages: [], recommendations: [], skillUpdates: [], updatesChecking: false, updatesInstalling: false, running: false, connection: "idle" };
   private updateCandidates: UpdateCandidate[] = [];
   constructor(private readonly extensionUri: vscode.Uri, private readonly client: PlatformClient, private readonly defaultWebBaseUrl: string) {}
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view; view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "out")] }; view.webview.html = this.html(view.webview);
+    if (!this.workspaceListeners.length) { this.workspaceListeners.push(vscode.window.onDidChangeActiveTextEditor(() => this.sendState()), vscode.workspace.onDidChangeWorkspaceFolders(() => this.sendState())); }
     view.webview.onDidReceiveMessage(async data => { const message = parseWebviewMessage(data); if (!message) return; try { await this.handle(message); } catch (error) { this.fail(error); } });
   }
-  dispose(): void { this.disposed = true; this.loginAttempt?.cancel(); this.sse?.close(); }
+  dispose(): void { this.disposed = true; this.loginAttempt?.cancel(); this.sse?.close(); this.workspaceListeners.forEach(listener => listener.dispose()); }
 
   private async handle(message: WebviewMessage): Promise<void> {
     switch (message.type) {
@@ -41,6 +47,7 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       case "install-all": { const skillKeys = [...new Set(this.state.recommendations.filter(item => (item.runKey ?? this.state.currentRunKey) === message.runKey && (item.status === "missing" || item.status === "update")).map(item => item.skillKey))]; getLogger().info(`[SkillInstall] 收到本轮批量安装请求 runKey=${message.runKey} skillCount=${skillKeys.length} skills=${skillKeys.join(",")}`); await this.install(message.runKey, skillKeys); break; }
       case "open-detail": await this.openDetail(message.detailPath); break;
       case "download-wiki": await this.downloadWiki(message.documentIds); break;
+      case "install-asdm-tool": await this.installAsdmTool(message.assetId); break;
       case "wiki-metadata-request": {
         const title = await this.client.wikiDocumentMetadata(message.documentId).then(value => value.title, () => "文档已不可访问");
         void this.post({ type: "wiki-metadata", documentId: message.documentId, title });
@@ -104,6 +111,7 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     logger.info(`[SkillInstall] Bundle 下载完成 runKey=${runKey} bundleId=${id} bytes=${bundle.byteLength}`);
     logger.info(`[SkillInstall] 正在写入 Skill runKey=${runKey} directory=${directory}`);
     const installed = await this.installer.install(bundle, descriptor, directory);
+    if (scope.value === "project") await ensureProjectIgnored(root, ".codebuddy");
     logger.info(`[SkillInstall] 安装完成 runKey=${runKey} directory=${directory} installed=${installed.join(",")}`);
     this.notice("info", `已安装：${installed.join("、")}`); this.state.recommendations = addInstallStatus(this.state.recommendations, await scanSkills(this.projectRoot())); this.sendState();
   }
@@ -141,7 +149,8 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
           if (!bundle) { const metadata = await this.client.createSkillUpdateBundle(this.state.osType, chunk); const descriptor = parseBundleDescriptor(metadata); if (!descriptor.items.length) throw new Error("更新 Bundle 没有可安装项"); const status = string(metadata.resultStatus) ?? string(metadata.status); if (status === "FAILED" || status === "BUILDING") throw new Error(status === "BUILDING" ? "更新 Bundle 尚未生成完成" : "更新 Bundle 生成失败"); const id = metadata.id ?? metadata.bundleId; if (typeof id !== "number" && typeof id !== "string") throw new Error("更新 Bundle 缺少下载 ID"); bundle = { bytes: await this.client.downloadBundle(id), descriptor }; bundleCache.set(cacheKey, bundle); }
           const { bytes, descriptor } = bundle;
           const collisions = await this.unmarkedCollisions(descriptor.items.map(item => item.skillKey), target.directory); if (collisions.length) { const answer = await vscode.window.showWarningMessage(`目标目录存在非平台安装的 Skill，将被覆盖：${collisions.join("、")}`, { modal: true }, "确认覆盖"); if (answer !== "确认覆盖") continue; }
-          await this.installer.install(bytes, descriptor, target.directory); 
+          await this.installer.install(bytes, descriptor, target.directory);
+          if (target.candidates.some(candidate => candidate.targets.some(location => location.directory === path.join(target.directory, candidate.skillKey) && location.scope === "project"))) await ensureProjectIgnored(path.dirname(path.dirname(target.directory)), ".codebuddy");
         }
       }
       this.notice("info", `已更新 ${selected.map(item => item.skillKey).join("、")}`); this.state.updatesInstalling = false; await this.checkSkillUpdates();
@@ -162,10 +171,29 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     await vscode.workspace.fs.writeFile(target, bytes);
     this.notice("info", `已下载 ${ids.length} 篇 Wiki 文档`);
   }
+  private async installAsdmTool(assetId: number): Promise<void> {
+    const projectRoot = this.projectRoot();
+    if (!projectRoot) { void vscode.window.showErrorMessage("请先打开项目，再安装 ASDM 工具包"); return; }
+    if (existsSync(path.join(projectRoot, ".asdm"))) {
+      const answer = await vscode.window.showWarningMessage("当前项目已有 .asdm 文件夹，安装将覆盖其中的现有内容。是否继续？", { modal: true }, "确认覆盖");
+      if (answer !== "确认覆盖") return;
+    }
+    await this.asdmInstaller.install(await this.client.downloadAsdmTool(assetId), projectRoot, assetId);
+    this.sendState();
+    void vscode.window.showInformationMessage("ASDM 工具包已安装到当前项目的 .asdm 文件夹");
+  }
   private async openDetail(detailPath: string): Promise<void> { const base = new URL(this.webBaseUrl()); const target = new URL(detailPath, base); if (target.origin !== base.origin) throw new Error("Skill 详情链接不属于已配置的平台地址"); await vscode.env.openExternal(vscode.Uri.parse(target.toString())); }
   private fail(error: unknown): void { const message = error instanceof Error ? error.message : String(error); getLogger().error(formatDiagnosticError(error)); this.state.running = false; if (error instanceof ServiceUrlValidationError) { this.state.error = undefined; this.sendState(); return; } this.state.error = message; this.sendState(); this.notice("error", message); }
   private notice(level: "info" | "error", message: string): void { void this.post({ type: "notice", level, message }); }
-  private sendState(): void { void this.post({ type: "state", ...this.state }); }
+  private sendState(): void {
+    const root = this.projectRoot();
+    try { this.state.asdmInstalled = !!root && statSync(path.join(root, ".asdm")).isDirectory(); } catch { this.state.asdmInstalled = false; }
+    if (root && this.state.asdmInstalled && !this.ignoredAsdmRoots.has(root)) {
+      this.ignoredAsdmRoots.add(root);
+      void this.asdmInstaller.ensureIgnored(root).catch(error => { this.ignoredAsdmRoots.delete(root); getLogger().error(formatDiagnosticError(error)); });
+    }
+    void this.post({ type: "state", ...this.state });
+  }
   private post(message: HostMessage): Thenable<boolean> | undefined { return this.view?.webview.postMessage(message); }
   private html(webview: vscode.Webview): string { const script = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "out", "main.js")); const style = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "out", "main.css")); const nonce = randomBytes(16).toString("base64"); return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';"><link href="${style}" rel="stylesheet"><title>研途助手</title></head><body><div id="root"></div><script type="module" nonce="${nonce}" src="${script}"></script></body></html>`; }
 }
