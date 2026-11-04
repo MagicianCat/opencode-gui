@@ -1693,3 +1693,9 @@ button:hover { background: var(--button-secondary-hover-background); } button:di
 .wiki-downloads-head,.wiki-download-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .wiki-download-row label { display:flex; align-items:center; gap:6px; min-width:0; overflow-wrap:anywhere; }
 .wiki-download-row button,.wiki-downloads-head button { flex:none; }
+.resource-toolbar { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; padding:6px 9px; border:1px solid var(--panel-border); border-radius:7px; background:var(--editor-background); color:var(--description-foreground); font-size:11px; }
+.resource-toolbar button { color:var(--text-link-foreground); background:transparent; }
+.resource-fold-toggle { display:inline-flex; align-items:center; gap:6px; min-width:0; padding:2px 0; color:var(--foreground); background:transparent; text-align:left; cursor:pointer; }
+.resource-fold-toggle span { flex:none; color:var(--description-foreground); }
+.resource-fold-toggle strong { overflow-wrap:anywhere; }
+.resource-group-toggle { width:100%; margin-top:18px; padding:7px 0; font-size:13px; }

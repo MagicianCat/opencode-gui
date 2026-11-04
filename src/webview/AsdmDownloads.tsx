@@ -20,15 +20,17 @@ export function citedAsdmTools(markdown: string): AsdmTool[] {
   return [...found.values()];
 }
 
-export function AsdmDownloads(props: { content: string; installed?: boolean }) {
+export function AsdmDownloads(props: { content: string; installed?: boolean; expanded: boolean; onToggle: () => void }) {
   const tools = createMemo(() => citedAsdmTools(props.content).slice(0, 1));
   return <Show when={tools().length}>
     <section class="wiki-downloads" aria-label="ASDM 工具包下载">
-      <div class="wiki-downloads-head"><strong>ASDM 工具包</strong><Show when={props.installed}><span class="badge project">项目已安装</span></Show></div>
+      <div class="wiki-downloads-head"><button class="resource-fold-toggle" aria-expanded={props.expanded} onClick={props.onToggle}><span aria-hidden="true">{props.expanded ? "▾" : "▸"}</span><strong>ASDM 工具包（{tools().length}）</strong></button><Show when={props.installed}><span class="badge project">项目已安装</span></Show></div>
+      <Show when={props.expanded}>
       <For each={tools()}>{tool => <div class="wiki-download-row">
         <span>{tool.title}</span>
         <button class="primary compact" onClick={() => vscode.postMessage({ type: "install-asdm-tool", assetId: tool.assetId })}>一键安装</button>
       </div>}</For>
+      </Show>
     </section>
   </Show>;
 }

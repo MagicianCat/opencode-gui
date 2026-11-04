@@ -17,7 +17,7 @@ function wikiId(href: string): number | undefined {
     const id = Number(raw); return Number.isSafeInteger(id) ? id : undefined;
   } catch { return undefined; }
 }
-function citedDocuments(markdown: string): WikiDocument[] {
+export function citedWikiDocuments(markdown: string): WikiDocument[] {
   const found = new Map<number, WikiDocument>();
   marked.walkTokens(marked.lexer(markdown), token => {
     if (token.type !== "link") return;
@@ -30,8 +30,8 @@ function citedDocuments(markdown: string): WikiDocument[] {
   });
   return [...found.values()];
 }
-export function WikiDownloads(props: { content: string }) {
-  const documents = createMemo(() => citedDocuments(props.content));
+export function WikiDownloads(props: { content: string; expanded: boolean; onToggle: () => void }) {
+  const documents = createMemo(() => citedWikiDocuments(props.content));
   createEffect(() => {
     for (const document of documents()) {
       if (requestedTitles.has(document.id)) continue;
@@ -47,13 +47,15 @@ export function WikiDownloads(props: { content: string }) {
   });
   return <Show when={documents().length}>
     <section class="wiki-downloads" aria-label="引用的 Wiki 文档">
-      <div class="wiki-downloads-head"><strong>引用的 Wiki 文档</strong><button onClick={() => setSelection(documents().slice(0, 20).map(document => document.id))}>全选</button></div>
+      <div class="wiki-downloads-head"><button class="resource-fold-toggle" aria-expanded={props.expanded} onClick={props.onToggle}><span aria-hidden="true">{props.expanded ? "▾" : "▸"}</span><strong>引用的 Wiki 文档（{documents().length}）</strong></button><Show when={props.expanded}><button onClick={() => setSelection(documents().slice(0, 20).map(document => document.id))}>全选</button></Show></div>
+      <Show when={props.expanded}>
       <For each={documents()}>{document => <div class="wiki-download-row">
         <label><input type="checkbox" checked={selected().includes(document.id)} onChange={() => toggle(document.id)} />{wikiTitles()[document.id] ?? (document.title.startsWith("Wiki 文档 #") ? "正在读取文档名称…" : document.title)}</label>
         <button onClick={() => vscode.postMessage({ type: "download-wiki", documentIds: [document.id] })}>下载</button>
       </div>}</For>
       <button class="primary compact" disabled={!selected().length} onClick={() => vscode.postMessage({ type: "download-wiki", documentIds: selected().slice(0, 20) })}>一键下载（{selected().length}）</button>
       <Show when={documents().length > 20}><small>每次最多选择 20 篇文档</small></Show>
+      </Show>
     </section>
   </Show>;
 }
