@@ -174,8 +174,8 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private async installAsdmTool(assetId: number): Promise<void> {
     const projectRoot = this.projectRoot();
     if (!projectRoot) { void vscode.window.showErrorMessage("请先打开项目，再安装 ASDM 工具包"); return; }
-    if (existsSync(path.join(projectRoot, ".asdm"))) {
-      const answer = await vscode.window.showWarningMessage("当前项目已有 .asdm 文件夹，安装将覆盖其中的现有内容。是否继续？", { modal: true }, "确认覆盖");
+    if (existsSync(path.join(projectRoot, ".asdm")) || existsSync(path.join(projectRoot, ".codebuddy", "commands"))) {
+      const answer = await vscode.window.showWarningMessage("安装将替换项目中的 .asdm，并清空重建 .codebuddy/commands。是否继续？", { modal: true }, "确认覆盖");
       if (answer !== "确认覆盖") return;
     }
     await this.asdmInstaller.install(await this.client.downloadAsdmTool(assetId), projectRoot, assetId);

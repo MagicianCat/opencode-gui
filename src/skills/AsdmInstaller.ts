@@ -36,16 +36,14 @@ export class AsdmInstaller {
       commands.set(name, `@.asdm/toolsets/${action.toolset}/actions/${action.filename}`);
     }
     const commandsRoot = path.join(projectRoot, ".codebuddy", "commands");
-    for (const [name, content] of commands) {
-      try {
-        const existing = await fs.readFile(path.join(commandsRoot, name), "utf8");
-        if (existing !== content) throw new Error(`已有不同内容的 Command：${name}`);
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    }
+    const codebuddyRoot = path.dirname(commandsRoot);
     const target = path.join(projectRoot, ".asdm");
     const stage = path.join(projectRoot, `.yantu-asdm-stage-${randomUUID()}`);
     const backup = path.join(projectRoot, `.yantu-asdm-backup-${randomUUID()}`);
-    let backedUp = false;
+    const commandStage = path.join(codebuddyRoot, `.yantu-commands-stage-${randomUUID()}`);
+    const commandBackup = path.join(codebuddyRoot, `.yantu-commands-backup-${randomUUID()}`);
+    let backedUp = false, commandsBackedUp = false;
+    let installedTarget = false, installedCommands = false;
     let committed = false;
     try {
       await fs.mkdir(stage);
@@ -57,25 +55,30 @@ export class AsdmInstaller {
         await fs.writeFile(destination, entry.data, { flag: "wx" });
       }
       await fs.writeFile(path.join(stage, ".yantu-platform-asdm.json"), JSON.stringify({ assetId, installedAt: new Date().toISOString() }), { flag: "wx" });
+      await fs.mkdir(codebuddyRoot, { recursive: true });
+      await fs.mkdir(commandStage);
+      for (const [name, content] of commands) await fs.writeFile(path.join(commandStage, name), content, { flag: "wx" });
       try { await fs.lstat(target); await fs.rename(target, backup); backedUp = true; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       await fs.rename(stage, target);
+      installedTarget = true;
+      try { await fs.lstat(commandsRoot); await fs.rename(commandsRoot, commandBackup); commandsBackedUp = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      await fs.rename(commandStage, commandsRoot);
+      installedCommands = true;
       committed = true;
     } catch (error) {
+      if (installedCommands) await fs.rm(commandsRoot, { recursive: true, force: true });
+      if (commandsBackedUp) await fs.rename(commandBackup, commandsRoot);
+      if (installedTarget) await fs.rm(target, { recursive: true, force: true });
       if (backedUp) await fs.rename(backup, target);
       throw error;
     } finally {
       if (!committed) await fs.rm(stage, { recursive: true, force: true });
+      if (!committed) await fs.rm(commandStage, { recursive: true, force: true });
     }
     if (backedUp) await fs.rm(backup, { recursive: true, force: true }).catch(() => { /* Installation succeeded; stale backup is recoverable. */ });
-    if (commands.size) await fs.mkdir(commandsRoot, { recursive: true });
-    for (const [name, content] of commands) {
-      try { await fs.writeFile(path.join(commandsRoot, name), content, { flag: "wx" }); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        if (await fs.readFile(path.join(commandsRoot, name), "utf8") !== content) throw new Error(`已有不同内容的 Command：${name}`);
-      }
-    }
+    if (commandsBackedUp) await fs.rm(commandBackup, { recursive: true, force: true }).catch(() => { /* Installation succeeded; stale backup is recoverable. */ });
     await ensureProjectIgnored(projectRoot, ".asdm");
     await ensureProjectIgnored(projectRoot, ".codebuddy");
   }

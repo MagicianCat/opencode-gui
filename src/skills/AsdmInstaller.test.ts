@@ -65,13 +65,17 @@ describe("AsdmInstaller", () => {
     expect(existsSync(path.join(commands, "notes.txt"))).toBe(false);
   });
 
-  it("rejects a conflicting existing command before replacing .asdm", async () => {
+  it("replaces the entire commands folder when installing another ASDM package", async () => {
     const project = mkdtempSync(path.join(tmpdir(), "asdm-project-")); roots.push(project);
-    mkdirSync(path.join(project, ".asdm")); writeFileSync(path.join(project, ".asdm", "old.md"), "old");
-    mkdirSync(path.join(project, ".codebuddy", "commands"), { recursive: true });
-    writeFileSync(path.join(project, ".codebuddy", "commands", "code-review.md"), "custom");
-    await expect(new AsdmInstaller().install(archive({ ".asdm/toolsets/code-dev/actions/code-review.md": "review" }), project, 42)).rejects.toThrow("已有不同内容");
-    expect(readFileSync(path.join(project, ".asdm", "old.md"), "utf8")).toBe("old");
+    const installer = new AsdmInstaller();
+    await installer.install(archive({ ".asdm/toolsets/old/actions/algorithm-design.md": "old", ".asdm/toolsets/old/actions/stale.md": "stale" }), project, 42);
+    writeFileSync(path.join(project, ".codebuddy", "commands", "custom.md"), "custom");
+    await installer.install(archive({ ".asdm/toolsets/new/actions/algorithm-design.md": "new" }), project, 43);
+    const commands = path.join(project, ".codebuddy", "commands");
+    expect(readFileSync(path.join(commands, "algorithm-design.md"), "utf8")).toBe("@.asdm/toolsets/new/actions/algorithm-design.md");
+    expect(existsSync(path.join(commands, "stale.md"))).toBe(false);
+    expect(existsSync(path.join(commands, "custom.md"))).toBe(false);
+    expect(existsSync(path.join(project, ".asdm", "toolsets", "old"))).toBe(false);
   });
 
   it("gives duplicate action names distinct command files", async () => {
