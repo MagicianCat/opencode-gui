@@ -89,6 +89,22 @@ describe("AsdmInstaller", () => {
     expect(readFileSync(path.join(commands, "code-review-code-review.md"), "utf8")).toBe("@.asdm/toolsets/code-review/actions/code-review.md");
   });
 
+  it("generates commands from Chinese toolset names like the server package", async () => {
+    const project = mkdtempSync(path.join(tmpdir(), "asdm-project-")); roots.push(project);
+    await new AsdmInstaller().install(archive({
+      ".asdm/toolsets/代码开发工具集/actions/code-review.md": "开发",
+      ".asdm/toolsets/代码开发工具集/actions/generate-coding-extensions.md": "扩展",
+      ".asdm/toolsets/代码开发工具集/rules/code-first-default-development-rules.mdc": "规则",
+      ".asdm/toolsets/代码评审工具集/actions/code-review.md": "评审",
+      ".asdm/toolsets/代码评审工具集/actions/set-review-standards.md": "标准",
+      ".asdm/toolsets/代码评审工具集/spec/report-template.md": "模板",
+    }), project, 42);
+    const commands = path.join(project, ".codebuddy", "commands");
+    expect(readFileSync(path.join(commands, "code-review.md"), "utf8")).toBe("@.asdm/toolsets/代码开发工具集/actions/code-review.md");
+    expect(readFileSync(path.join(commands, "代码评审工具集-code-review.md"), "utf8")).toBe("@.asdm/toolsets/代码评审工具集/actions/code-review.md");
+    expect(existsSync(path.join(commands, "report-template.md"))).toBe(false);
+  });
+
   it("rejects an archive without .asdm and leaves the project intact", async () => {
     const project = mkdtempSync(path.join(tmpdir(), "asdm-project-")); roots.push(project);
     await expect(new AsdmInstaller().install(archive({ "README.md": "no tools" }), project, 42)).rejects.toThrow("没有 .asdm");

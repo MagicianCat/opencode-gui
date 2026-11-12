@@ -42,7 +42,7 @@ export class PlatformClient {
   async beginDeviceLogin(): Promise<DeviceLogin> {
     const verifier = randomBytes(48).toString("base64url");
     const challenge = createHash("sha256").update(verifier).digest("base64url");
-    const device = DeviceSchema.parse(await this.requestRaw("/auth/ide/authorizations", { method: "POST", body: JSON.stringify({ clientName: "CodeBuddy IDE / 研途助手", codeChallenge: challenge, codeChallengeMethod: "S256" }) }));
+    const device = DeviceSchema.parse(await this.requestRaw("/auth/ide/authorizations", { method: "POST", body: JSON.stringify({ clientName: "CodeBuddy IDE / 研途助手", codeChallenge: challenge, codeChallengeMethod: "S256" }), signal: AbortSignal.timeout(12000) }));
     const controller = new AbortController(); const verification = new URL(device.verificationUri); verification.search = ""; verification.searchParams.set("user_code", device.userCode);
     return {
       userCode: device.userCode,
@@ -112,10 +112,10 @@ export class PlatformClient {
     const response = await this.authorizedFetch(`/wiki/documents/${documentId}/download`, {}, true);
     return Buffer.from(await response.arrayBuffer());
   }
-  async asdmToolMetadata(assetId: number): Promise<{ filename: string }> {
+  async asdmToolMetadata(assetId: number): Promise<{ filename: string; wikiTitle?: string }> {
     const value = asRecord(await this.request(`/asdm-tool-assets/${assetId}`));
     if (typeof value.filename !== "string" || !value.filename.trim()) throw new Error("工具包文件名响应无效");
-    return { filename: value.filename };
+    return { filename: value.filename, wikiTitle: typeof value.wikiTitle === "string" ? value.wikiTitle : undefined };
   }
   async downloadAsdmTool(assetId: number): Promise<Buffer> {
     const response = await this.authorizedFetch(`/asdm-tool-assets/${assetId}/download`, {}, true);

@@ -53,6 +53,11 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
         void this.post({ type: "wiki-metadata", documentId: message.documentId, title });
         break;
       }
+      case "asdm-metadata-request": {
+        const title = await this.client.asdmToolMetadata(message.assetId).then(value => value.wikiTitle || value.filename, () => "工具包已不可访问");
+        void this.post({ type: "asdm-metadata", assetId: message.assetId, title });
+        break;
+      }
       case "install-updates": await this.installUpdates(message.skillKeys); break;
       case "dismiss-updates": this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.sendState(); break;
       case "retry-updates": await this.checkSkillUpdates(); break;
@@ -65,8 +70,18 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     if (this.state.authenticated && (!this.state.currentSessionKey || this.state.messages.length === 0)) void this.checkSkillUpdates();
   }
   private async login(): Promise<void> {
-    this.loginAttempt?.cancel(); const login = await this.client.beginDeviceLogin(); this.loginAttempt = login; this.state.loginPending = true; this.state.userCode = login.userCode; this.state.error = undefined; this.sendState(); await vscode.env.openExternal(vscode.Uri.parse(login.verificationUriComplete)); this.notice("info", "已在浏览器打开登录页面，请核对设备码");
-    try { await login.poll(); if (!this.disposed) await this.bootstrap(); } catch (error) { if (!(error instanceof Error && error.name === "AbortError") && !this.disposed) throw error; } finally { if (this.loginAttempt === login) { this.loginAttempt = undefined; this.state.loginPending = false; this.state.userCode = undefined; if (!this.disposed) this.sendState(); } }
+    if (this.state.loginPending) return;
+    this.loginAttempt?.cancel(); this.state.loginPending = true; this.state.userCode = undefined; this.state.error = undefined; this.sendState();
+    let login: DeviceLogin | undefined;
+    try {
+      login = await this.client.beginDeviceLogin(); this.loginAttempt = login; this.state.userCode = login.userCode; this.sendState();
+      await vscode.env.openExternal(vscode.Uri.parse(login.verificationUriComplete)); this.notice("info", "已在浏览器打开登录页面，请核对设备码");
+      await login.poll(); if (!this.disposed) await this.bootstrap();
+    } catch (error) {
+      if (!(error instanceof Error && error.name === "AbortError") && !this.disposed) throw error;
+    } finally {
+      if (!login || this.loginAttempt === login) { this.loginAttempt = undefined; this.state.loginPending = false; this.state.userCode = undefined; if (!this.disposed) this.sendState(); }
+    }
   }
   private async newSession(): Promise<void> { const session = await this.client.createSession(this.state.osType); this.sse?.close(); this.updateCandidates = []; this.state.sessions = [session, ...this.state.sessions]; this.state.currentSessionKey = session.sessionKey; this.state.messages = []; this.state.recommendations = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.state.updatesChecking = false; this.sendState(); void this.checkSkillUpdates(); }
   private async selectSession(key: string): Promise<void> { this.sse?.close(); this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; const detail = await this.client.session(key); this.state.currentSessionKey = key; this.state.messages = detail.messages; this.state.currentRunKey = detail.latestRun?.runKey ?? [...detail.messages].reverse().find(message => message.runKey)?.runKey; this.state.recommendations = addInstallStatus(detail.recommendations.map(normalizeRecommendation).filter((item): item is Recommendation => item !== null), await scanSkills(this.projectRoot())); this.state.running = detail.latestRun ? ["PENDING", "RUNNING"].includes(detail.latestRun.status) : false; this.state.connection = this.state.running ? "connecting" : "idle"; this.sendState(); if (this.state.running && this.state.currentRunKey) await this.connectRun(this.state.currentRunKey); if (!detail.messages.length) void this.checkSkillUpdates(); }
