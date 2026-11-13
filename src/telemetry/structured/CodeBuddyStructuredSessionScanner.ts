@@ -11,7 +11,7 @@ type Json = Record<string, unknown>;
 export interface StructuredSkillCall { skillKey: string; toolCallId: string; invokedAt: string; }
 export interface StructuredCommandCall { commandName: string; promptPath?: string; triggerType: "MENU" | "TYPED";
   evidenceType: "STRUCTURED_COMMAND" | "ACTION_FILE_READ"; invokedAt: string; verified: boolean;
-  reqArgument?: string; }
+  reqArgument?: string; readActionPaths?: string[]; }
 export interface StructuredConversationMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; }
 export interface StructuredTurn {
   nativeInstallationId: string;
@@ -150,12 +150,9 @@ export class CodeBuddyStructuredSessionScanner {
               }
             }
             if (!withinBackfill) continue;
-            const commandCalls = commandCandidates.map(candidate => {
-              if (candidate.triggerType === "MENU") return [candidate];
-              const match = [...readPaths].find(file => file.endsWith(`/actions/${candidate.commandName}.md`) &&
-                file.includes("/.asdm/toolsets/"));
-              return [{ ...candidate, promptPath: match?.slice(match.indexOf(".asdm/toolsets/")), verified: Boolean(match) }];
-            }).flat();
+            const actionReads = [...readPaths].filter(file => /(?:^|\/)\.asdm\/toolsets\/[^/]+\/actions\/[^/]+\.md$/u.test(file));
+            const commandCalls = commandCandidates.map(candidate => candidate.triggerType === "MENU" ? candidate :
+              { ...candidate, readActionPaths: actionReads, verified: actionReads.length > 0 });
             const diffs = fileTree ? fileMetrics(fileTree, requestId) : undefined;
             const reqIdsFromFiles = fileTree ? requirementIdsFromFiles(fileTree, requestId) : [];
             const messageEvidence = turnMessages.map(message => [message.id, message.role,
@@ -235,7 +232,7 @@ function object(value: unknown): Json | undefined {
   }
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : undefined;
 }
-function normalizePath(value: string): string { return value.replace(/\\/g, "/").replace(/^@/, "").toLowerCase(); }
+function normalizePath(value: string): string { return value.replace(/\\/g, "/").replace(/^@/, ""); }
 function commandCandidate(extra: Json | undefined, invokedAt: string, message?: string): StructuredCommandCall | undefined {
   if (!extra) return undefined;
   const blocks = Array.isArray(extra.sourceContentBlocks) ? extra.sourceContentBlocks.map(object) : [];
@@ -243,7 +240,7 @@ function commandCandidate(extra: Json | undefined, invokedAt: string, message?: 
   const meta = object(resource?._meta);
   const phrase = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object).find(item => item?.type === "command") : undefined;
   const menuName = string(meta?.commandName) ?? string(extra.command) ?? string(phrase?.content);
-  if (menuName && /^[a-z][\w-]{0,127}$/i.test(menuName)) {
+  if (menuName && /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,127}$/u.test(menuName)) {
     const parts = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object) : [];
     const commandIndex = parts.findIndex(part => part?.type === "command");
     const argument = commandIndex >= 0 ? parts.slice(commandIndex + 1).filter(part => part?.type === "normal")
@@ -255,7 +252,7 @@ function commandCandidate(extra: Json | undefined, invokedAt: string, message?: 
       reqArgument: firstReqArgument(argument || blocksText) ?? reqFromUserQuery(message, menuName) };
   }
   const normal = Array.isArray(extra.inputPhrase) ? extra.inputPhrase.map(object).find(item => item?.type === "normal") : undefined;
-  const typed = string(normal?.content)?.match(/^\/([a-z][\w-]{0,127})(?:\s|$)/i);
+  const typed = string(normal?.content)?.match(/^\/([\p{L}\p{N}][\p{L}\p{N}._-]{0,127})(?:\s|$)/u);
   return typed ? { commandName: typed[1]!, triggerType: "TYPED", evidenceType: "ACTION_FILE_READ",
     invokedAt, verified: false, reqArgument: firstReqArgument(string(normal?.content)?.slice(typed[0].length)) ??
       reqFromUserQuery(message, typed[1]!) } : undefined;
@@ -264,7 +261,7 @@ function reqFromUserQuery(message: string | undefined, command: string): string 
   if (!message) return undefined;
   const userQuery = message.match(/<user_query>([\s\S]*?)<\/user_query>/)?.[1];
   if (!userQuery) return undefined;
-  const prefix = userQuery.match(/^\s*(?:@command:\/\/|\/)([a-z][\w-]{0,127})(?:\s|$)/i);
+  const prefix = userQuery.match(/^\s*(?:@command:\/\/|\/)([\p{L}\p{N}][\p{L}\p{N}._-]{0,127})(?:\s|$)/u);
   return prefix?.[1] === command ? firstReqArgument(userQuery.slice(prefix[0].length)) : undefined;
 }
 function firstReqArgument(argument?: string): string | undefined {

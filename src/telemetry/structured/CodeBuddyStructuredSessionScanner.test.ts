@@ -96,11 +96,18 @@ describe("CodeBuddy structured session", () => {
       await fs.writeFile(path.join(project, ".codebuddy", "commands", `${name}.md`), `@${action}`);
       await fs.writeFile(path.join(project, action), "action");
     }
+    const alias = "代码评审工具集-code-review";
+    const aliasAction = `.asdm/toolsets/代码评审工具集/actions/code-review.md`;
+    await fs.mkdir(path.dirname(path.join(project, aliasAction)), { recursive: true });
+    await fs.writeFile(path.join(project, aliasAction), "action");
+    await fs.writeFile(path.join(project, ".codebuddy", "commands", `${alias}.md`), `@${aliasAction}`);
+    await fs.writeFile(path.join(project, ".asdm", ".yantu-platform-asdm.json"), JSON.stringify({ assetId: 123 }));
     const started = new Date("2026-10-26T11:30:00Z").getTime();
     await fs.writeFile(path.join(projectSession, "index.json"), JSON.stringify({ workspacePath: project, requests: [
       { id: "menu", startedAt: started, state: "complete", messages: ["menu-msg"] },
       { id: "typed", startedAt: started + 1000, state: "complete", messages: ["typed-msg", "read-msg"] },
       { id: "plain", startedAt: started + 2000, state: "complete", messages: ["plain-msg"] },
+      { id: "alias", startedAt: started + 3000, state: "complete", messages: ["alias-msg", "alias-read"] },
     ] }));
     const messages = path.join(projectSession, "messages");
     await fs.writeFile(path.join(messages, "menu-msg.json"), JSON.stringify({ role: "user", createdAt: started,
@@ -113,23 +120,30 @@ describe("CodeBuddy structured session", () => {
     await fs.writeFile(path.join(messages, "read-msg.json"), JSON.stringify({ role: "assistant", createdAt: started + 1200,
       extra: { requestId: "typed" }, message: { toolName: "read_file", toolCallId: "read-1",
         args: { filePath: path.join(project, ".asdm/toolsets/context-builder-requirements/actions/asdm-req-context-init.md") } } }));
+    await fs.writeFile(path.join(messages, "alias-msg.json"), JSON.stringify({ role: "user", createdAt: started + 3000,
+      extra: JSON.stringify({ requestId: "alias", inputPhrase: [{ type: "normal", content: `/${alias}` }] }) }));
+    await fs.writeFile(path.join(messages, "alias-read.json"), JSON.stringify({ role: "assistant", createdAt: started + 3200,
+      extra: { requestId: "alias" }, message: { toolName: "read_file", toolCallId: "read-alias",
+        args: { filePath: path.join(project, aliasAction) } } }));
     const queue = new TelemetryQueue(home);
     const monitor = new CodeBuddyLogSkillMonitor(console, { homeDirectory: home, localAppDataDirectory: local,
       logRoots: [], activeWorkspaceDirectory: project, queue, generationStore: new GenerationStateStore(home),
       structuredPollIntervalMs: 0, now: () => new Date("2026-10-26T12:00:00Z") });
     await monitor.poll();
     const files = await queue.pendingCommands();
-    expect(files).toHaveLength(2);
+    expect(files).toHaveLength(3);
     const commands = await Promise.all(files.map(file => queue.readCommand(file)));
     expect(commands).toEqual(expect.arrayContaining([
       expect.objectContaining({ commandName: "code-review", toolsetName: "code-dev", triggerType: "MENU" }),
       expect.objectContaining({ commandName: "asdm-req-context-init", triggerType: "TYPED",
         evidenceType: "ACTION_FILE_READ" }),
+      expect.objectContaining({ commandName: alias, toolsetName: "代码评审工具集", asdmAssetId: 123,
+        triggerType: "TYPED", evidenceType: "ACTION_FILE_READ" }),
     ]));
     await monitor.poll();
-    expect(await queue.pendingCommands()).toHaveLength(2);
+    expect(await queue.pendingCommands()).toHaveLength(3);
     const diagnostics = (await fs.readFile(queue.commandDiagnosticFile, "utf8")).trim().split("\n").map(JSON.parse);
-    expect(diagnostics.filter(row => row.event === "queued")).toHaveLength(2);
+    expect(diagnostics.filter(row => row.event === "queued")).toHaveLength(3);
     expect(diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ event: "skipped",
       commandName: "asdm-req-context-init", reason: "action_read_unverified", requestId: "plain" })]));
     expect(JSON.stringify(diagnostics)).not.toContain(project);
@@ -141,7 +155,7 @@ describe("CodeBuddy structured session", () => {
       versions: [{ versionId: "v1", metadata: { requestId: "menu" }, diff: { addedLines: 1 } }] }]));
     await monitor.poll();
     const revisedRows = await Promise.all((await queue.pendingCommands()).map(file => queue.readCommand(file)));
-    expect(revisedRows).toHaveLength(3);
+    expect(revisedRows).toHaveLength(4);
     const after = revisedRows.find(row => row.commandName === "code-review" && row.reqId)!;
     expect(after).toMatchObject({ eventId: before.eventId, reqId: "REQ-001-review",
       reqIdSource: "REQUEST_FILE_TREE" });

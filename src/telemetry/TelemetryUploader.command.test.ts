@@ -14,7 +14,7 @@ describe("Command telemetry upload diagnostics", () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "yantu-command-upload-")); roots.push(home);
     const queue = new TelemetryQueue(home);
     const eventId = "11111111-2222-4333-8444-555555555555";
-    await queue.enqueueCommand({ eventId, commandName: "code-review", triggerType: "MENU",
+    await queue.enqueueCommand({ eventId, commandName: "code-review", toolsetName: "代码评审工具集", asdmAssetId: 123, triggerType: "MENU",
       evidenceType: "STRUCTURED_COMMAND", clientSessionId: "session", generationId: "log-request",
       client: "CodeBuddyIDE", invokedAt: "2026-11-02T02:33:17Z" });
     const record = vi.fn().mockRejectedValueOnce(new HttpError(503, "unavailable")).mockResolvedValue(undefined);
@@ -25,6 +25,7 @@ describe("Command telemetry upload diagnostics", () => {
     expect(await queue.pendingCommands()).toHaveLength(1);
     await uploader["flush"]();
     expect(await queue.pendingCommands()).toHaveLength(0);
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ eventId, toolsetName: "代码评审工具集", asdmAssetId: 123 }));
     const rows = (await fs.readFile(queue.commandDiagnosticFile, "utf8")).trim().split("\n").map(JSON.parse);
     expect(rows).toEqual([expect.objectContaining({ event: "upload_failed", eventId, reason: "HTTP_503" }),
       expect.objectContaining({ event: "uploaded", eventId })]);

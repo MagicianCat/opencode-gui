@@ -10,6 +10,7 @@ import { GenerationStateStore } from "./generation/GenerationStateStore";
 import { emptyGeneration, type FileDiffMetric, type GenerationState, type GenerationTokenUsage } from "./generation/GenerationState";
 import { ProjectResolver } from "./project/ProjectResolver";
 import { CodeBuddyStructuredSessionScanner, type StructuredTurn } from "./structured/CodeBuddyStructuredSessionScanner";
+import { resolveAsdmCommand } from "./asdm/AsdmCommandResolver";
 
 const gzipAsync = promisify(gzip);
 const MAX_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -450,35 +451,22 @@ export class CodeBuddyLogSkillMonitor implements vscode.Disposable {
     }
     const project = await this.projectResolver.resolve(normalized);
     for (const call of turn.commandCalls) {
-      if (!/^[a-z][\w-]{0,127}$/i.test(call.commandName)) {
-        await this.commandDiagnostic("skipped", turn, call.commandName, "invalid_command_name"); continue;
+      const resolution = await resolveAsdmCommand(normalized, call.commandName, call);
+      if (!resolution.command) {
+        await this.commandDiagnostic("skipped", turn, call.commandName, resolution.reason); continue;
       }
-      const commandFile = path.join(normalized, ".codebuddy", "commands", `${call.commandName}.md`);
-      let definition: string;
-      try { definition = (await fs.readFile(commandFile, "utf8")).trim(); }
-      catch { await this.commandDiagnostic("skipped", turn, call.commandName, "command_not_installed"); continue; }
-      const action = definition.match(/^@?\.asdm\/toolsets\/([\w-]+)\/actions\/([\w-]+\.md)$/);
-      if (!action || action[2] !== `${call.commandName}.md`) {
-        await this.commandDiagnostic("skipped", turn, call.commandName, "invalid_asdm_mapping"); continue;
-      }
-      const expected = `.asdm/toolsets/${action[1]}/actions/${action[2]}`;
-      if (call.promptPath && call.promptPath.replace(/\\/g, "/").replace(/^@/, "").toLowerCase() !== expected.toLowerCase()) {
-        await this.commandDiagnostic("skipped", turn, call.commandName, "prompt_mapping_mismatch"); continue;
-      }
-      try { await fs.access(path.join(normalized, expected)); }
-      catch { await this.commandDiagnostic("skipped", turn, call.commandName, "action_file_missing"); continue; }
-      if (!call.verified) {
-        await this.commandDiagnostic("skipped", turn, call.commandName, "action_read_unverified"); continue;
-      }
-      const req = await this.resolveCommandReq(normalized, action[1]!, call.commandName,
+      const command = resolution.command;
+      const req = await this.resolveCommandReq(normalized, command.toolsetName, call.commandName,
         call.reqArgument, turn.reqIdsFromFiles);
       const eventId = this.commandEventId(turn.nativeInstallationId, turn.conversationId, turn.requestId, call.commandName);
-      await this.queue.enqueueCommand({ eventId, commandName: call.commandName, toolsetName: action[1],
+      await this.queue.enqueueCommand({ eventId, commandName: call.commandName, toolsetName: command.toolsetName,
+        asdmAssetId: command.asdmAssetId,
         triggerType: call.triggerType, evidenceType: call.evidenceType, installationId: this.clientInstallationId,
         reqId: req?.id, reqIdSource: req?.source,
         clientSessionId: turn.conversationId, generationId: this.generationId(turn.requestId),
         projectKey: project.projectKey, client: "CodeBuddyIDE", invokedAt: call.invokedAt });
       await this.commandDiagnostic("queued", turn, call.commandName, undefined, eventId);
+      await this.queue.commandDiagnostic(command.sourceStatus, { eventId, commandName: call.commandName });
       if (req) await this.queue.commandDiagnostic("req_resolved", { eventId, commandName: call.commandName,
         reqId: req.id, source: req.source });
       this.logger.info(`已采集 ASDM 命令：${call.commandName}，事件 ${eventId}${req ? `，需求 ${req.id}` : ""}`);

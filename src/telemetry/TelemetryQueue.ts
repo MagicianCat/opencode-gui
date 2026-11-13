@@ -10,7 +10,7 @@ export interface SkillUsageMetadata {
   conversationFile?: string; transcriptPath?: string; messageIds?: string[];
 }
 export interface CommandUsageMetadata {
-  eventId: string; commandName: string; toolsetName?: string; triggerType: "MENU" | "TYPED";
+  eventId: string; commandName: string; toolsetName?: string; asdmAssetId?: number; triggerType: "MENU" | "TYPED";
   evidenceType: "STRUCTURED_COMMAND" | "ACTION_FILE_READ"; installationId?: string;
   reqId?: string; reqIdSource?: "ARGUMENT" | "REQUEST_FILE_TREE";
   clientSessionId: string; generationId: string; projectKey?: string; client: string;
