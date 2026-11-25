@@ -9,4 +9,6 @@ const noopVscode = {
   postMessage: (_message: WebviewMessage) => {},
 };
 
-export const vscode = hasVscodeApi ? acquireVsCodeApi!() : noopVscode;
+const jetBrainsHost = (window as Window & { yantuHost?: YantuVsCodeApi }).yantuHost;
+
+export const vscode = jetBrainsHost ?? (hasVscodeApi ? acquireVsCodeApi!() : noopVscode);

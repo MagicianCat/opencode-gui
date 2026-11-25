@@ -83,11 +83,11 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       if (!login || this.loginAttempt === login) { this.loginAttempt = undefined; this.state.loginPending = false; this.state.userCode = undefined; if (!this.disposed) this.sendState(); }
     }
   }
-  private async newSession(): Promise<void> { const session = await this.client.createSession(this.state.osType); this.sse?.close(); this.updateCandidates = []; this.state.sessions = [session, ...this.state.sessions]; this.state.currentSessionKey = session.sessionKey; this.state.messages = []; this.state.recommendations = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.state.updatesChecking = false; this.sendState(); void this.checkSkillUpdates(); }
-  private async selectSession(key: string): Promise<void> { this.sse?.close(); this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; const detail = await this.client.session(key); this.state.currentSessionKey = key; this.state.messages = detail.messages; this.state.currentRunKey = detail.latestRun?.runKey ?? [...detail.messages].reverse().find(message => message.runKey)?.runKey; this.state.recommendations = addInstallStatus(detail.recommendations.map(normalizeRecommendation).filter((item): item is Recommendation => item !== null), await scanSkills(this.projectRoot())); this.state.running = detail.latestRun ? ["PENDING", "RUNNING"].includes(detail.latestRun.status) : false; this.state.connection = this.state.running ? "connecting" : "idle"; this.sendState(); if (this.state.running && this.state.currentRunKey) await this.connectRun(this.state.currentRunKey); if (!detail.messages.length) void this.checkSkillUpdates(); }
+  private async newSession(): Promise<void> { this.state.cancelled = false; const session = await this.client.createSession(this.state.osType); this.sse?.close(); this.updateCandidates = []; this.state.sessions = [session, ...this.state.sessions]; this.state.currentSessionKey = session.sessionKey; this.state.messages = []; this.state.recommendations = []; this.state.skillUpdates = []; this.state.updateError = undefined; this.state.updatesChecking = false; this.sendState(); void this.checkSkillUpdates(); }
+  private async selectSession(key: string): Promise<void> { this.state.cancelled = false; this.sse?.close(); this.updateCandidates = []; this.state.skillUpdates = []; this.state.updateError = undefined; const detail = await this.client.session(key); this.state.currentSessionKey = key; this.state.messages = detail.messages; this.state.currentRunKey = detail.latestRun?.runKey ?? [...detail.messages].reverse().find(message => message.runKey)?.runKey; this.state.recommendations = addInstallStatus(detail.recommendations.map(normalizeRecommendation).filter((item): item is Recommendation => item !== null), await scanSkills(this.projectRoot())); this.state.running = detail.latestRun ? ["PENDING", "RUNNING"].includes(detail.latestRun.status) : false; this.state.connection = this.state.running ? "connecting" : "idle"; this.sendState(); if (this.state.running && this.state.currentRunKey) await this.connectRun(this.state.currentRunKey); if (!detail.messages.length) void this.checkSkillUpdates(); }
   private async sendMessage(content: string): Promise<void> {
     if (!this.state.currentSessionKey) await this.newSession(); const sessionKey = this.state.currentSessionKey; if (!sessionKey) return;
-    this.state.messages.push({ id: `local-${Date.now()}`, role: "user", content }); this.state.running = true; this.state.error = undefined; this.sendState();
+    this.state.messages.push({ id: `local-${Date.now()}`, role: "user", content }); this.state.running = true; this.state.cancelled = false; this.state.error = undefined; this.sendState();
     const run = await this.client.sendMessage(sessionKey, content, this.state.osType); this.state.currentRunKey = run.runKey; await this.connectRun(run.runKey);
   }
   private async connectRun(runKey: string): Promise<void> {
@@ -100,6 +100,15 @@ export class YantuViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     if (type === "message.delta") { const delta = string(data.delta) ?? string(data.content) ?? string(data.text) ?? ""; let assistant = this.state.messages.at(-1); if (!assistant || assistant.role !== "assistant") { assistant = { id: string(data.messageKey) ?? `assistant-${Date.now()}`, role: "assistant", content: "", runKey }; this.state.messages.push(assistant); } assistant.content += delta; }
     else if (type === "tool.started" || type === "tool.completed" || type === "tool.failed") { return; }
     else if (type === "recommendation.completed") { const raw = Array.isArray(data.items) ? data.items : Array.isArray(payload.items) ? payload.items : []; const recommendationRunKey = string(data.runKey) ?? string(payload.runKey) ?? runKey; const recommendations = raw.map(item => normalizeRecommendation(item, recommendationRunKey)).filter((item): item is Recommendation => item !== null); const local = await scanSkills(this.projectRoot()); this.state.recommendations = [...this.state.recommendations, ...addInstallStatus(recommendations, local)]; }
+    if (type === "run.completed" && this.state.currentRunKey === runKey) {
+      const answer = string(data.message);
+      if (answer?.trim()) {
+        const assistant = [...this.state.messages].reverse().find(message => message.role === "assistant" && message.runKey === runKey);
+        if (assistant) assistant.content = answer;
+        else this.state.messages.push({ id: `assistant-${runKey}`, role: "assistant", content: answer, runKey });
+      }
+    }
+    if (type === "run.cancelled" && this.state.currentRunKey === runKey) this.state.cancelled = true;
     if (["run.completed", "run.failed", "run.cancelled", "done"].includes(type ?? "")) { this.state.running = false; this.state.connection = "closed"; this.sse?.close(); }
     this.sendState();
   }

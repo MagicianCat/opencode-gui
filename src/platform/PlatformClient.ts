@@ -101,7 +101,7 @@ export class PlatformClient {
     return RunSchema.parse(await this.request(`/agent/sessions/${encodeURIComponent(sessionKey)}/messages`, { method: "POST", body: JSON.stringify({ content, context: { platform: "CODEBUDDY", osType } }) }));
   }
 
-  async cancelRun(runKey: string): Promise<void> { await this.request(`/agent/runs/${encodeURIComponent(runKey)}:cancel`, { method: "POST" }); }
+  async cancelRun(runKey: string): Promise<void> { await this.authorizedFetch(`/agent/runs/${encodeURIComponent(runKey)}:cancel`, { method: "POST" }); }
   async downloadWikiDocuments(documentIds: number[]): Promise<Buffer> {
     const response = await this.authorizedFetch("/wiki/documents:download", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ documentIds }),
